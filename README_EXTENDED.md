@@ -1,11 +1,3 @@
-<<<<<<< HEAD
-# postman-cse-payment-accelerator
-=======
-# postman-cse-payment-accelerator
-
-Lightweight scaffold for generating and managing a Postman collection from an OpenAPI refund API spec.
-
-```markdown
 # postman-cse-payment-accelerator
 
 Lightweight scaffold for generating and managing a Postman collection from an OpenAPI refund API spec.
@@ -105,13 +97,10 @@ Automation pattern summary:
 ## Next steps
 
 - Review the `generated/postman_actions.log` after running `ingest_refund_api.py` to confirm Spec Hub creation and collection generation.
-- If you'd like, I can also:
-  - Add a CI job (GitHub Actions) to run ingestion for all specs in a matrix.
-  - Add a `--dry-run` flag to `ingest_refund_api.py` to preview actions without calling Postman.
+- If you want the script to always create a Spec Hub spec (instead of using the Import API), set `USE_SPEC_HUB=true` in your `.env` and run the script; errors will be logged.
 
 ---
 
 If you'd like, I can also:
 - Add a CI job (GitHub Actions) to run ingestion for all specs in a matrix.
 - Add a `--dry-run` flag to `ingest_refund_api.py` to preview actions without calling Postman.
-```

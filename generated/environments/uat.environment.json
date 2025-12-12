@@ -1,0 +1,28 @@
+{
+  "uid": "17451434-1765d744-e150-4a9e-b76c-821549cd9b9f",
+  "payload": {
+    "name": "Payments \u2013 Refund API \u2013 UAT",
+    "values": [
+      {
+        "key": "base_url",
+        "value": "https://api-uat.payments.example.com/v2",
+        "enabled": true
+      },
+      {
+        "key": "jwt_issuer",
+        "value": "internal-platform",
+        "enabled": true
+      },
+      {
+        "key": "jwt_audience",
+        "value": "refunds",
+        "enabled": true
+      },
+      {
+        "key": "jwt_secret",
+        "value": "demo-secret-only",
+        "enabled": true
+      }
+    ]
+  }
+}

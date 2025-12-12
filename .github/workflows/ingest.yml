@@ -1,0 +1,41 @@
+name: Ingest OpenAPI -> Postman
+
+on:
+  push:
+    paths:
+      - 'specs/**'
+      - 'scripts/**'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    env:
+      POSTMAN_API_KEY: ${{ secrets.POSTMAN_API_KEY }}
+      POSTMAN_WORKSPACE_ID: ${{ secrets.POSTMAN_WORKSPACE_ID }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run ingestion
+        run: |
+          python .\scripts\ingest_refund_api.py
+        shell: bash
+
+      - name: Show last log lines
+        if: always()
+        run: |
+          echo '--- postman actions log (tail) ---'
+          tail -n 40 generated/postman_actions.log || true
+        shell: bash

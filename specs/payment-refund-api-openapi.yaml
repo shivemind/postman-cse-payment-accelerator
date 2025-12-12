@@ -1,0 +1,1257 @@
+openapi: 3.0.3
+info:
+  title: Payment Processing API - Refund Service
+  description: |
+    Comprehensive API for managing payment refunds in a financial services platform.
+    This API handles refund creation, status tracking, cancellation, and reporting for
+    payment transactions processed through the authorization and capture workflow.
+    
+    **Authentication:**
+    - External partners: OAuth 2.0 (Bearer token)
+    - Internal services: JWT token (Bearer token)
+    
+    **Rate Limits:**
+    - Standard tier: 100 requests/minute
+    - Enterprise tier: 1000 requests/minute
+  version: 2.1.0
+  contact:
+    name: Payment Platform Team
+    email: payment-platform@example.com
+    url: https://docs.example.com/payment-apis
+  license:
+    name: Proprietary
+    url: https://example.com/license
+
+servers:
+  - url: https://api.payments.example.com/v2
+    description: Production environment
+  - url: https://api-uat.payments.example.com/v2
+    description: UAT environment
+  - url: https://api-qa.payments.example.com/v2
+    description: QA environment
+  - url: https://api-dev.payments.example.com/v2
+    description: Development environment
+
+tags:
+  - name: Refunds
+    description: Operations for creating and managing payment refunds
+  - name: Refund Status
+    description: Operations for querying refund status and history
+  - name: Health
+    description: Service health and availability checks
+
+security:
+  - OAuth2: []
+  - JWT: []
+
+paths:
+  /refunds:
+    post:
+      tags:
+        - Refunds
+      summary: Create a new refund
+      description: |
+        Initiates a refund for a previously captured payment transaction. The refund
+        can be for the full amount or a partial amount. The refund status will be
+        'pending' initially and transition to 'completed' or 'failed' based on
+        processing results.
+        
+        **Business Rules:**
+        - Refunds can only be issued for transactions in 'captured' status
+        - Partial refunds must not exceed the original transaction amount
+        - Refunds cannot be created more than 180 days after the original transaction
+        - Maximum of 5 refunds per transaction
+      operationId: createRefund
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRefundRequest'
+            examples:
+              full_refund:
+                summary: Full refund example
+                value:
+                  transactionId: "txn_1234567890abcdef"
+                  amount: null
+                  reason: "Customer requested refund"
+                  notifyCustomer: true
+                  metadata:
+                    initiatedBy: "admin@example.com"
+                    ticketNumber: "TKT-12345"
+              partial_refund:
+                summary: Partial refund example
+                value:
+                  transactionId: "txn_0987654321fedcba"
+                  amount: 2500
+                  currency: "USD"
+                  reason: "Partial refund for damaged item"
+                  notifyCustomer: true
+                  metadata:
+                    initiatedBy: "support@example.com"
+                    ticketNumber: "TKT-67890"
+                    refundReasonCode: "ITEM_DAMAGED"
+      responses:
+        '201':
+          description: Refund created successfully
+          headers:
+            Location:
+              description: URI of the created refund resource
+              schema:
+                type: string
+                format: uri
+              example: "/refunds/rfnd_abc123def456"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefundResponse'
+              examples:
+                success_full:
+                  summary: Full refund created
+                  value:
+                    refundId: "rfnd_abc123def456"
+                    transactionId: "txn_1234567890abcdef"
+                    status: "pending"
+                    amount: 5000
+                    currency: "USD"
+                    refundAmount: 5000
+                    refundCurrency: "USD"
+                    reason: "Customer requested refund"
+                    createdAt: "2024-01-15T10:30:00Z"
+                    updatedAt: "2024-01-15T10:30:00Z"
+                    estimatedCompletionTime: "2024-01-15T14:30:00Z"
+                    metadata:
+                      initiatedBy: "admin@example.com"
+                      ticketNumber: "TKT-12345"
+                    links:
+                      self: "/refunds/rfnd_abc123def456"
+                      status: "/refunds/rfnd_abc123def456/status"
+                      cancel: "/refunds/rfnd_abc123def456/cancel"
+                success_partial:
+                  summary: Partial refund created
+                  value:
+                    refundId: "rfnd_xyz789ghi012"
+                    transactionId: "txn_0987654321fedcba"
+                    status: "pending"
+                    amount: 5000
+                    currency: "USD"
+                    refundAmount: 2500
+                    refundCurrency: "USD"
+                    reason: "Partial refund for damaged item"
+                    createdAt: "2024-01-15T11:00:00Z"
+                    updatedAt: "2024-01-15T11:00:00Z"
+                    estimatedCompletionTime: "2024-01-15T15:00:00Z"
+                    metadata:
+                      initiatedBy: "support@example.com"
+                      ticketNumber: "TKT-67890"
+                      refundReasonCode: "ITEM_DAMAGED"
+                    links:
+                      self: "/refunds/rfnd_xyz789ghi012"
+                      status: "/refunds/rfnd_xyz789ghi012/status"
+                      cancel: "/refunds/rfnd_xyz789ghi012/cancel"
+        '400':
+          description: Bad request - Invalid input or business rule violation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_amount:
+                  summary: Invalid refund amount
+                  value:
+                    error: "INVALID_REFUND_AMOUNT"
+                    message: "Refund amount exceeds the original transaction amount"
+                    details:
+                      transactionId: "txn_1234567890abcdef"
+                      originalAmount: 5000
+                      requestedRefundAmount: 6000
+                      currency: "USD"
+                    code: "VALIDATION_ERROR"
+                    timestamp: "2024-01-15T10:30:00Z"
+                transaction_not_captured:
+                  summary: Transaction not in captured status
+                  value:
+                    error: "TRANSACTION_NOT_ELIGIBLE"
+                    message: "Refunds can only be issued for transactions in 'captured' status"
+                    details:
+                      transactionId: "txn_1234567890abcdef"
+                      currentStatus: "authorized"
+                      eligibleStatuses: ["captured"]
+                    code: "BUSINESS_RULE_VIOLATION"
+                    timestamp: "2024-01-15T10:30:00Z"
+                too_many_refunds:
+                  summary: Maximum refunds exceeded
+                  value:
+                    error: "MAX_REFUNDS_EXCEEDED"
+                    message: "Maximum of 5 refunds allowed per transaction"
+                    details:
+                      transactionId: "txn_1234567890abcdef"
+                      currentRefundCount: 5
+                      maxRefunds: 5
+                    code: "BUSINESS_RULE_VIOLATION"
+                    timestamp: "2024-01-15T10:30:00Z"
+        '401':
+          description: Unauthorized - Invalid or missing authentication token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                missing_token:
+                  summary: Missing authentication token
+                  value:
+                    error: "UNAUTHORIZED"
+                    message: "Authentication token is required"
+                    details:
+                      requiredAuth: "Bearer token (OAuth 2.0 or JWT)"
+                    code: "AUTHENTICATION_ERROR"
+                    timestamp: "2024-01-15T10:30:00Z"
+                invalid_token:
+                  summary: Invalid or expired token
+                  value:
+                    error: "UNAUTHORIZED"
+                    message: "Invalid or expired authentication token"
+                    details:
+                      tokenType: "JWT"
+                      expirationTime: "2024-01-15T09:00:00Z"
+                    code: "AUTHENTICATION_ERROR"
+                    timestamp: "2024-01-15T10:30:00Z"
+        '404':
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                transaction_not_found:
+                  summary: Transaction does not exist
+                  value:
+                    error: "TRANSACTION_NOT_FOUND"
+                    message: "The specified transaction was not found"
+                    details:
+                      transactionId: "txn_invalid123"
+                      suggestion: "Verify the transaction ID and try again"
+                    code: "RESOURCE_NOT_FOUND"
+                    timestamp: "2024-01-15T10:30:00Z"
+        '409':
+          description: Conflict - Refund already exists or transaction state conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                duplicate_refund:
+                  summary: Duplicate refund request
+                  value:
+                    error: "DUPLICATE_REFUND"
+                    message: "A refund with the same parameters already exists for this transaction"
+                    details:
+                      transactionId: "txn_1234567890abcdef"
+                      existingRefundId: "rfnd_existing123"
+                      conflictType: "duplicate_request"
+                    code: "CONFLICT"
+                    timestamp: "2024-01-15T10:30:00Z"
+        '422':
+          description: Unprocessable entity - Business validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                transaction_too_old:
+                  summary: Transaction too old for refund
+                  value:
+                    error: "TRANSACTION_TOO_OLD"
+                    message: "Refunds cannot be issued more than 180 days after the original transaction"
+                    details:
+                      transactionId: "txn_1234567890abcdef"
+                      transactionDate: "2023-06-01T00:00:00Z"
+                      daysSinceTransaction: 195
+                      maxDaysAllowed: 180
+                    code: "BUSINESS_RULE_VIOLATION"
+                    timestamp: "2024-01-15T10:30:00Z"
+        '429':
+          description: Too many requests - Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                rate_limit_exceeded:
+                  summary: Rate limit exceeded
+                  value:
+                    error: "RATE_LIMIT_EXCEEDED"
+                    message: "Rate limit exceeded. Please retry after the specified time"
+                    details:
+                      limit: 100
+                      window: "1 minute"
+                      retryAfter: 45
+                    code: "RATE_LIMIT_ERROR"
+                    timestamp: "2024-01-15T10:30:00Z"
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                internal_error:
+                  summary: Internal server error
+                  value:
+                    error: "INTERNAL_SERVER_ERROR"
+                    message: "An unexpected error occurred while processing the refund"
+                    details:
+                      requestId: "req_abc123def456"
+                      suggestion: "Please retry the request. If the issue persists, contact support."
+                    code: "SERVER_ERROR"
+                    timestamp: "2024-01-15T10:30:00Z"
+                service_unavailable:
+                  summary: Service temporarily unavailable
+                  value:
+                    error: "SERVICE_UNAVAILABLE"
+                    message: "The refund service is temporarily unavailable"
+                    details:
+                      requestId: "req_xyz789ghi012"
+                      estimatedRecoveryTime: "2024-01-15T11:00:00Z"
+                      retryAfter: 1800
+                    code: "SERVER_ERROR"
+                    timestamp: "2024-01-15T10:30:00Z"
+        '503':
+          description: Service unavailable - Maintenance or overload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                maintenance_mode:
+                  summary: Service in maintenance
+                  value:
+                    error: "MAINTENANCE_MODE"
+                    message: "The service is currently under maintenance"
+                    details:
+                      maintenanceWindow: "2024-01-15T02:00:00Z - 2024-01-15T04:00:00Z"
+                      estimatedCompletion: "2024-01-15T04:00:00Z"
+                    code: "SERVICE_UNAVAILABLE"
+                    timestamp: "2024-01-15T10:30:00Z"
+
+    get:
+      tags:
+        - Refund Status
+      summary: List refunds
+      description: |
+        Retrieves a paginated list of refunds. Supports filtering by transaction ID,
+        status, date range, and amount range. Results are sorted by creation date
+        in descending order (newest first).
+      operationId: listRefunds
+      parameters:
+        - $ref: '#/components/parameters/TransactionIdFilter'
+        - $ref: '#/components/parameters/StatusFilter'
+        - $ref: '#/components/parameters/StartDateFilter'
+        - $ref: '#/components/parameters/EndDateFilter'
+        - $ref: '#/components/parameters/PageNumber'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Successful response with refund list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefundListResponse'
+              examples:
+                multiple_refunds:
+                  summary: Multiple refunds found
+                  value:
+                    refunds:
+                      - refundId: "rfnd_abc123def456"
+                        transactionId: "txn_1234567890abcdef"
+                        status: "completed"
+                        amount: 5000
+                        currency: "USD"
+                        refundAmount: 5000
+                        refundCurrency: "USD"
+                        reason: "Customer requested refund"
+                        createdAt: "2024-01-15T10:30:00Z"
+                        completedAt: "2024-01-15T14:25:00Z"
+                        links:
+                          self: "/refunds/rfnd_abc123def456"
+                      - refundId: "rfnd_xyz789ghi012"
+                        transactionId: "txn_0987654321fedcba"
+                        status: "pending"
+                        amount: 5000
+                        currency: "USD"
+                        refundAmount: 2500
+                        refundCurrency: "USD"
+                        reason: "Partial refund for damaged item"
+                        createdAt: "2024-01-15T11:00:00Z"
+                        links:
+                          self: "/refunds/rfnd_xyz789ghi012"
+                    pagination:
+                      page: 1
+                      pageSize: 20
+                      totalPages: 3
+                      totalItems: 47
+                      hasNext: true
+                      hasPrevious: false
+                empty_list:
+                  summary: No refunds found
+                  value:
+                    refunds: []
+                    pagination:
+                      page: 1
+                      pageSize: 20
+                      totalPages: 0
+                      totalItems: 0
+                      hasNext: false
+                      hasPrevious: false
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimitExceeded'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /refunds/{refundId}:
+    get:
+      tags:
+        - Refund Status
+      summary: Get refund details
+      description: |
+        Retrieves detailed information about a specific refund by its ID.
+        Includes full status history, processing details, and related transaction information.
+      operationId: getRefund
+      parameters:
+        - $ref: '#/components/parameters/RefundId'
+      responses:
+        '200':
+          description: Refund details retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefundDetailResponse'
+              examples:
+                completed_refund:
+                  summary: Completed refund details
+                  value:
+                    refundId: "rfnd_abc123def456"
+                    transactionId: "txn_1234567890abcdef"
+                    status: "completed"
+                    amount: 5000
+                    currency: "USD"
+                    refundAmount: 5000
+                    refundCurrency: "USD"
+                    reason: "Customer requested refund"
+                    createdAt: "2024-01-15T10:30:00Z"
+                    updatedAt: "2024-01-15T14:25:00Z"
+                    completedAt: "2024-01-15T14:25:00Z"
+                    processingTime: 14520
+                    statusHistory:
+                      - status: "pending"
+                        timestamp: "2024-01-15T10:30:00Z"
+                        message: "Refund request created"
+                      - status: "processing"
+                        timestamp: "2024-01-15T12:00:00Z"
+                        message: "Refund processing initiated"
+                      - status: "completed"
+                        timestamp: "2024-01-15T14:25:00Z"
+                        message: "Refund processed successfully"
+                    metadata:
+                      initiatedBy: "admin@example.com"
+                      ticketNumber: "TKT-12345"
+                      paymentGatewayRefundId: "pg_rfnd_789xyz"
+                    links:
+                      self: "/refunds/rfnd_abc123def456"
+                      transaction: "/transactions/txn_1234567890abcdef"
+                pending_refund:
+                  summary: Pending refund details
+                  value:
+                    refundId: "rfnd_xyz789ghi012"
+                    transactionId: "txn_0987654321fedcba"
+                    status: "pending"
+                    amount: 5000
+                    currency: "USD"
+                    refundAmount: 2500
+                    refundCurrency: "USD"
+                    reason: "Partial refund for damaged item"
+                    createdAt: "2024-01-15T11:00:00Z"
+                    updatedAt: "2024-01-15T11:00:00Z"
+                    estimatedCompletionTime: "2024-01-15T15:00:00Z"
+                    statusHistory:
+                      - status: "pending"
+                        timestamp: "2024-01-15T11:00:00Z"
+                        message: "Refund request created and queued for processing"
+                    metadata:
+                      initiatedBy: "support@example.com"
+                      ticketNumber: "TKT-67890"
+                      refundReasonCode: "ITEM_DAMAGED"
+                    links:
+                      self: "/refunds/rfnd_xyz789ghi012"
+                      cancel: "/refunds/rfnd_xyz789ghi012/cancel"
+                      status: "/refunds/rfnd_xyz789ghi012/status"
+                failed_refund:
+                  summary: Failed refund details
+                  value:
+                    refundId: "rfnd_failed123"
+                    transactionId: "txn_1234567890abcdef"
+                    status: "failed"
+                    amount: 5000
+                    currency: "USD"
+                    refundAmount: 5000
+                    refundCurrency: "USD"
+                    reason: "Customer requested refund"
+                    createdAt: "2024-01-15T10:00:00Z"
+                    updatedAt: "2024-01-15T10:45:00Z"
+                    failedAt: "2024-01-15T10:45:00Z"
+                    failureReason: "Payment gateway connection timeout"
+                    failureCode: "GATEWAY_TIMEOUT"
+                    statusHistory:
+                      - status: "pending"
+                        timestamp: "2024-01-15T10:00:00Z"
+                        message: "Refund request created"
+                      - status: "processing"
+                        timestamp: "2024-01-15T10:30:00Z"
+                        message: "Refund processing initiated"
+                      - status: "failed"
+                        timestamp: "2024-01-15T10:45:00Z"
+                        message: "Refund processing failed: Payment gateway connection timeout"
+                    metadata:
+                      initiatedBy: "admin@example.com"
+                      ticketNumber: "TKT-12345"
+                    links:
+                      self: "/refunds/rfnd_failed123"
+                      retry: "/refunds/rfnd_failed123/retry"
+        '404':
+          description: Refund not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                refund_not_found:
+                  summary: Refund does not exist
+                  value:
+                    error: "REFUND_NOT_FOUND"
+                    message: "The specified refund was not found"
+                    details:
+                      refundId: "rfnd_invalid123"
+                      suggestion: "Verify the refund ID and try again"
+                    code: "RESOURCE_NOT_FOUND"
+                    timestamp: "2024-01-15T10:30:00Z"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /refunds/{refundId}/status:
+    get:
+      tags:
+        - Refund Status
+      summary: Get refund status
+      description: |
+        Retrieves the current status of a refund. This is a lightweight endpoint
+        optimized for frequent polling. Returns minimal data compared to the full
+        refund details endpoint.
+      operationId: getRefundStatus
+      parameters:
+        - $ref: '#/components/parameters/RefundId'
+      responses:
+        '200':
+          description: Refund status retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefundStatusResponse'
+              examples:
+                pending_status:
+                  summary: Pending refund status
+                  value:
+                    refundId: "rfnd_xyz789ghi012"
+                    status: "pending"
+                    updatedAt: "2024-01-15T11:00:00Z"
+                    estimatedCompletionTime: "2024-01-15T15:00:00Z"
+                completed_status:
+                  summary: Completed refund status
+                  value:
+                    refundId: "rfnd_abc123def456"
+                    status: "completed"
+                    updatedAt: "2024-01-15T14:25:00Z"
+                    completedAt: "2024-01-15T14:25:00Z"
+                failed_status:
+                  summary: Failed refund status
+                  value:
+                    refundId: "rfnd_failed123"
+                    status: "failed"
+                    updatedAt: "2024-01-15T10:45:00Z"
+                    failedAt: "2024-01-15T10:45:00Z"
+                    failureReason: "Payment gateway connection timeout"
+        '404':
+          description: Refund not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                refund_not_found:
+                  summary: Refund does not exist
+                  value:
+                    error: "REFUND_NOT_FOUND"
+                    message: "The specified refund was not found"
+                    details:
+                      refundId: "rfnd_invalid123"
+                    code: "RESOURCE_NOT_FOUND"
+                    timestamp: "2024-01-15T10:30:00Z"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /refunds/{refundId}/cancel:
+    post:
+      tags:
+        - Refunds
+      summary: Cancel a pending refund
+      description: |
+        Cancels a refund that is in 'pending' status. Once a refund has started
+        processing or is completed, it cannot be cancelled. The refund will be
+        immediately moved to 'cancelled' status.
+      operationId: cancelRefund
+      parameters:
+        - $ref: '#/components/parameters/RefundId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  description: Reason for cancellation
+                  example: "Customer changed mind"
+            examples:
+              cancel_reason:
+                summary: Cancel with reason
+                value:
+                  reason: "Customer changed mind and wants to keep the item"
+      responses:
+        '200':
+          description: Refund cancelled successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefundResponse'
+              examples:
+                cancelled_refund:
+                  summary: Refund cancelled
+                  value:
+                    refundId: "rfnd_xyz789ghi012"
+                    transactionId: "txn_0987654321fedcba"
+                    status: "cancelled"
+                    amount: 5000
+                    currency: "USD"
+                    refundAmount: 2500
+                    refundCurrency: "USD"
+                    reason: "Partial refund for damaged item"
+                    createdAt: "2024-01-15T11:00:00Z"
+                    updatedAt: "2024-01-15T11:30:00Z"
+                    cancelledAt: "2024-01-15T11:30:00Z"
+                    cancellationReason: "Customer changed mind and wants to keep the item"
+                    links:
+                      self: "/refunds/rfnd_xyz789ghi012"
+        '400':
+          description: Bad request - Cannot cancel refund
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                cannot_cancel:
+                  summary: Cannot cancel processed refund
+                  value:
+                    error: "REFUND_CANNOT_BE_CANCELLED"
+                    message: "Only pending refunds can be cancelled"
+                    details:
+                      refundId: "rfnd_abc123def456"
+                      currentStatus: "processing"
+                      allowedStatuses: ["pending"]
+                    code: "BUSINESS_RULE_VIOLATION"
+                    timestamp: "2024-01-15T10:30:00Z"
+        '404':
+          description: Refund not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                refund_not_found:
+                  summary: Refund does not exist
+                  value:
+                    error: "REFUND_NOT_FOUND"
+                    message: "The specified refund was not found"
+                    details:
+                      refundId: "rfnd_invalid123"
+                    code: "RESOURCE_NOT_FOUND"
+                    timestamp: "2024-01-15T10:30:00Z"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Health check
+      description: |
+        Returns the health status of the refund service. Useful for monitoring
+        and load balancer health checks.
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [healthy, degraded, unhealthy]
+                    example: "healthy"
+                  timestamp:
+                    type: string
+                    format: date-time
+                    example: "2024-01-15T10:30:00Z"
+                  version:
+                    type: string
+                    example: "2.1.0"
+                  services:
+                    type: object
+                    properties:
+                      database:
+                        type: string
+                        example: "operational"
+                      paymentGateway:
+                        type: string
+                        example: "operational"
+                      notificationService:
+                        type: string
+                        example: "operational"
+              examples:
+                healthy:
+                  summary: All services operational
+                  value:
+                    status: "healthy"
+                    timestamp: "2024-01-15T10:30:00Z"
+                    version: "2.1.0"
+                    services:
+                      database: "operational"
+                      paymentGateway: "operational"
+                      notificationService: "operational"
+                degraded:
+                  summary: Some services degraded
+                  value:
+                    status: "degraded"
+                    timestamp: "2024-01-15T10:30:00Z"
+                    version: "2.1.0"
+                    services:
+                      database: "operational"
+                      paymentGateway: "degraded"
+                      notificationService: "operational"
+        '503':
+          description: Service is unhealthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [unhealthy]
+                    example: "unhealthy"
+                  timestamp:
+                    type: string
+                    format: date-time
+                    example: "2024-01-15T10:30:00Z"
+                  version:
+                    type: string
+                    example: "2.1.0"
+                  services:
+                    type: object
+                    properties:
+                      database:
+                        type: string
+                        example: "down"
+                      paymentGateway:
+                        type: string
+                        example: "down"
+              examples:
+                unhealthy:
+                  summary: Service unavailable
+                  value:
+                    status: "unhealthy"
+                    timestamp: "2024-01-15T10:30:00Z"
+                    version: "2.1.0"
+                    services:
+                      database: "down"
+                      paymentGateway: "down"
+                      notificationService: "operational"
+
+components:
+  securitySchemes:
+    OAuth2:
+      type: oauth2
+      description: |
+        OAuth 2.0 authentication for external partners. Use the authorization
+        code flow to obtain an access token.
+      flows:
+        authorizationCode:
+          authorizationUrl: https://auth.example.com/oauth2/authorize
+          tokenUrl: https://auth.example.com/oauth2/token
+          scopes:
+            refunds:read: Read refund information
+            refunds:write: Create and manage refunds
+            refunds:admin: Full administrative access to refunds
+    JWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT token authentication for internal services. Tokens are issued by the
+        internal identity provider and must include the 'refunds' scope.
+
+  parameters:
+    RefundId:
+      name: refundId
+      in: path
+      required: true
+      description: Unique identifier for the refund
+      schema:
+        type: string
+        pattern: '^rfnd_[a-zA-Z0-9]+$'
+        example: "rfnd_abc123def456"
+    TransactionIdFilter:
+      name: transactionId
+      in: query
+      description: Filter refunds by transaction ID
+      schema:
+        type: string
+        pattern: '^txn_[a-zA-Z0-9]+$'
+        example: "txn_1234567890abcdef"
+    StatusFilter:
+      name: status
+      in: query
+      description: Filter refunds by status
+      schema:
+        type: string
+        enum: [pending, processing, completed, failed, cancelled]
+        example: "pending"
+    StartDateFilter:
+      name: startDate
+      in: query
+      description: Filter refunds created on or after this date
+      schema:
+        type: string
+        format: date-time
+        example: "2024-01-01T00:00:00Z"
+    EndDateFilter:
+      name: endDate
+      in: query
+      description: Filter refunds created on or before this date
+      schema:
+        type: string
+        format: date-time
+        example: "2024-01-31T23:59:59Z"
+    PageNumber:
+      name: page
+      in: query
+      description: Page number for pagination (1-based)
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+        example: 1
+    PageSize:
+      name: pageSize
+      in: query
+      description: Number of items per page
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+        example: 20
+
+  schemas:
+    CreateRefundRequest:
+      type: object
+      required:
+        - transactionId
+      properties:
+        transactionId:
+          type: string
+          description: The transaction ID to refund
+          pattern: '^txn_[a-zA-Z0-9]+$'
+          example: "txn_1234567890abcdef"
+        amount:
+          type: integer
+          description: |
+            Partial refund amount in the smallest currency unit (cents for USD).
+            If omitted, a full refund is issued.
+          minimum: 1
+          example: 2500
+        currency:
+          type: string
+          description: Currency code (ISO 4217). Must match original transaction currency.
+          pattern: '^[A-Z]{3}$'
+          default: "USD"
+          example: "USD"
+        reason:
+          type: string
+          description: Reason for the refund
+          maxLength: 500
+          example: "Customer requested refund"
+        notifyCustomer:
+          type: boolean
+          description: Whether to send a notification email to the customer
+          default: true
+          example: true
+        metadata:
+          type: object
+          description: Additional metadata for the refund
+          additionalProperties: true
+          example:
+            initiatedBy: "admin@example.com"
+            ticketNumber: "TKT-12345"
+            refundReasonCode: "CUSTOMER_REQUEST"
+
+    RefundResponse:
+      type: object
+      properties:
+        refundId:
+          type: string
+          description: Unique identifier for the refund
+          pattern: '^rfnd_[a-zA-Z0-9]+$'
+          example: "rfnd_abc123def456"
+        transactionId:
+          type: string
+          description: The original transaction ID
+          pattern: '^txn_[a-zA-Z0-9]+$'
+          example: "txn_1234567890abcdef"
+        status:
+          type: string
+          description: Current status of the refund
+          enum: [pending, processing, completed, failed, cancelled]
+          example: "pending"
+        amount:
+          type: integer
+          description: Original transaction amount in smallest currency unit
+          example: 5000
+        currency:
+          type: string
+          description: Original transaction currency code
+          example: "USD"
+        refundAmount:
+          type: integer
+          description: Refund amount in smallest currency unit
+          example: 5000
+        refundCurrency:
+          type: string
+          description: Refund currency code
+          example: "USD"
+        reason:
+          type: string
+          description: Reason for the refund
+          example: "Customer requested refund"
+        createdAt:
+          type: string
+          format: date-time
+          description: Timestamp when the refund was created
+          example: "2024-01-15T10:30:00Z"
+        updatedAt:
+          type: string
+          format: date-time
+          description: Timestamp when the refund was last updated
+          example: "2024-01-15T10:30:00Z"
+        completedAt:
+          type: string
+          format: date-time
+          description: Timestamp when the refund was completed (if applicable)
+          example: "2024-01-15T14:25:00Z"
+        cancelledAt:
+          type: string
+          format: date-time
+          description: Timestamp when the refund was cancelled (if applicable)
+          example: "2024-01-15T11:30:00Z"
+        failedAt:
+          type: string
+          format: date-time
+          description: Timestamp when the refund failed (if applicable)
+          example: "2024-01-15T10:45:00Z"
+        estimatedCompletionTime:
+          type: string
+          format: date-time
+          description: Estimated time when the refund will be completed (for pending refunds)
+          example: "2024-01-15T14:30:00Z"
+        cancellationReason:
+          type: string
+          description: Reason for cancellation (if applicable)
+          example: "Customer changed mind"
+        failureReason:
+          type: string
+          description: Reason for failure (if applicable)
+          example: "Payment gateway connection timeout"
+        failureCode:
+          type: string
+          description: Error code for failure (if applicable)
+          example: "GATEWAY_TIMEOUT"
+        processingTime:
+          type: integer
+          description: Processing time in seconds (for completed refunds)
+          example: 14520
+        metadata:
+          type: object
+          description: Additional metadata
+          additionalProperties: true
+          example:
+            initiatedBy: "admin@example.com"
+            ticketNumber: "TKT-12345"
+        links:
+          $ref: '#/components/schemas/RefundLinks'
+
+    RefundDetailResponse:
+      allOf:
+        - $ref: '#/components/schemas/RefundResponse'
+        - type: object
+          properties:
+            statusHistory:
+              type: array
+              description: History of status changes
+              items:
+                $ref: '#/components/schemas/StatusHistoryEntry'
+            paymentGatewayRefundId:
+              type: string
+              description: Refund ID from the payment gateway
+              example: "pg_rfnd_789xyz"
+
+    RefundStatusResponse:
+      type: object
+      properties:
+        refundId:
+          type: string
+          description: Unique identifier for the refund
+          pattern: '^rfnd_[a-zA-Z0-9]+$'
+          example: "rfnd_abc123def456"
+        status:
+          type: string
+          description: Current status of the refund
+          enum: [pending, processing, completed, failed, cancelled]
+          example: "pending"
+        updatedAt:
+          type: string
+          format: date-time
+          description: Timestamp when the refund was last updated
+          example: "2024-01-15T11:00:00Z"
+        completedAt:
+          type: string
+          format: date-time
+          description: Timestamp when the refund was completed (if applicable)
+          example: "2024-01-15T14:25:00Z"
+        failedAt:
+          type: string
+          format: date-time
+          description: Timestamp when the refund failed (if applicable)
+          example: "2024-01-15T10:45:00Z"
+        estimatedCompletionTime:
+          type: string
+          format: date-time
+          description: Estimated time when the refund will be completed (for pending refunds)
+          example: "2024-01-15T14:30:00Z"
+        failureReason:
+          type: string
+          description: Reason for failure (if applicable)
+          example: "Payment gateway connection timeout"
+
+    RefundListResponse:
+      type: object
+      properties:
+        refunds:
+          type: array
+          description: List of refunds
+          items:
+            $ref: '#/components/schemas/RefundResponse'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    StatusHistoryEntry:
+      type: object
+      properties:
+        status:
+          type: string
+          description: Status value
+          enum: [pending, processing, completed, failed, cancelled]
+          example: "pending"
+        timestamp:
+          type: string
+          format: date-time
+          description: When this status was set
+          example: "2024-01-15T10:30:00Z"
+        message:
+          type: string
+          description: Human-readable message about this status change
+          example: "Refund request created"
+
+    RefundLinks:
+      type: object
+      properties:
+        self:
+          type: string
+          description: Link to this refund resource
+          example: "/refunds/rfnd_abc123def456"
+        status:
+          type: string
+          description: Link to refund status endpoint
+          example: "/refunds/rfnd_abc123def456/status"
+        cancel:
+          type: string
+          description: Link to cancel this refund (if applicable)
+          example: "/refunds/rfnd_abc123def456/cancel"
+        retry:
+          type: string
+          description: Link to retry this refund (if applicable)
+          example: "/refunds/rfnd_abc123def456/retry"
+        transaction:
+          type: string
+          description: Link to the original transaction
+          example: "/transactions/txn_1234567890abcdef"
+
+    Pagination:
+      type: object
+      properties:
+        page:
+          type: integer
+          description: Current page number (1-based)
+          example: 1
+        pageSize:
+          type: integer
+          description: Number of items per page
+          example: 20
+        totalPages:
+          type: integer
+          description: Total number of pages
+          example: 3
+        totalItems:
+          type: integer
+          description: Total number of items
+          example: 47
+        hasNext:
+          type: boolean
+          description: Whether there is a next page
+          example: true
+        hasPrevious:
+          type: boolean
+          description: Whether there is a previous page
+          example: false
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - message
+        - code
+        - timestamp
+      properties:
+        error:
+          type: string
+          description: Error code identifier
+          example: "INVALID_REFUND_AMOUNT"
+        message:
+          type: string
+          description: Human-readable error message
+          example: "Refund amount exceeds the original transaction amount"
+        details:
+          type: object
+          description: Additional error details
+          additionalProperties: true
+          example:
+            transactionId: "txn_1234567890abcdef"
+            originalAmount: 5000
+            requestedRefundAmount: 6000
+        code:
+          type: string
+          description: Error category code
+          enum: [VALIDATION_ERROR, BUSINESS_RULE_VIOLATION, AUTHENTICATION_ERROR, AUTHORIZATION_ERROR, RESOURCE_NOT_FOUND, CONFLICT, RATE_LIMIT_ERROR, SERVER_ERROR, SERVICE_UNAVAILABLE]
+          example: "VALIDATION_ERROR"
+        timestamp:
+          type: string
+          format: date-time
+          description: When the error occurred
+          example: "2024-01-15T10:30:00Z"
+
+  responses:
+    BadRequest:
+      description: Bad request - Invalid input
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            validation_error:
+              summary: Validation error
+              value:
+                error: "VALIDATION_ERROR"
+                message: "Invalid request parameters"
+                details:
+                  field: "transactionId"
+                  issue: "Invalid format"
+                code: "VALIDATION_ERROR"
+                timestamp: "2024-01-15T10:30:00Z"
+    Unauthorized:
+      description: Unauthorized - Invalid or missing authentication
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            unauthorized:
+              summary: Authentication required
+              value:
+                error: "UNAUTHORIZED"
+                message: "Authentication token is required"
+                code: "AUTHENTICATION_ERROR"
+                timestamp: "2024-01-15T10:30:00Z"
+    RateLimitExceeded:
+      description: Too many requests - Rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            rate_limit:
+              summary: Rate limit exceeded
+              value:
+                error: "RATE_LIMIT_EXCEEDED"
+                message: "Rate limit exceeded. Please retry after the specified time"
+                details:
+                  limit: 100
+                  window: "1 minute"
+                  retryAfter: 45
+                code: "RATE_LIMIT_ERROR"
+                timestamp: "2024-01-15T10:30:00Z"
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            internal_error:
+              summary: Internal server error
+              value:
+                error: "INTERNAL_SERVER_ERROR"
+                message: "An unexpected error occurred"
+                details:
+                  requestId: "req_abc123def456"
+                code: "SERVER_ERROR"
+                timestamp: "2024-01-15T10:30:00Z"
