@@ -104,6 +104,39 @@ def main():
         _write_log("spec_hash_check", "changed", {"prev": prev_hash, "now": spec_sha256})
 
     # Choose flow: Spec Hub (create_spec -> generate_collection) or Import API.
+    # Resolve target collection UID (support numeric-prefixed UID or plain UUID id)
+    from postman_api import resolve_collection_uid, collection_exists, delete_collection
+
+    provided_raw = os.getenv("POSTMAN_COLLECTION_UID", "")
+    provided = provided_raw.strip() if provided_raw else None
+    target_uid = None
+    collection_uid_source = None
+    if provided:
+        try:
+            resolved = resolve_collection_uid(api_key, workspace_id, provided)
+            if resolved:
+                # verify the resolved uid actually exists; if not, treat as not found (do not fail)
+                try:
+                    if collection_exists(api_key, resolved):
+                        target_uid = resolved
+                        collection_uid_source = "env_secret_resolved_uid"
+                        _write_log("collection_uid_resolution", "resolved", {"source": "env", "note": "resolved_to_uid"})
+                    else:
+                        collection_uid_source = "env_secret_not_found"
+                        _write_log("collection_uid_resolution", "not_found", {"source": "env"})
+                except Exception as e:
+                    # If existence check fails, treat as not found but log
+                    collection_uid_source = "env_secret_check_error"
+                    _write_log("collection_uid_resolution", "error", {"error": str(e)})
+                    target_uid = None
+            else:
+                # Provided value did not match expected formats or could not be resolved
+                collection_uid_source = "env_secret_invalid"
+                _write_log("collection_uid_resolution", "invalid", {"source": "env"})
+        except Exception as e:
+            collection_uid_source = "env_secret_resolution_error"
+            _write_log("collection_uid_resolution", "error", {"error": str(e)})
+
     use_spec_hub = os.getenv("USE_SPEC_HUB", "false").lower() in ("1", "true", "yes")
     collection = None
     if use_spec_hub:
@@ -123,10 +156,28 @@ def main():
             print("⚠️ Spec Hub flow failed, falling back to Import API:", err)
             _write_log("create_spec", "failed", {"error": err})
 
-    if collection is None:
+    # Only call the Import API when we don't have a known target UID
+    imported_uid = None
+    if collection is None and not target_uid:
         print("🔹 Importing OpenAPI spec via Postman Import API")
         _write_log("import_openapi_attempt", "starting", {"name": spec_name})
         collection = import_openapi(api_key, workspace_id, spec_name, spec_content)
+        # Try to extract a UID if Postman created the collection on import
+        try:
+            imported_uid = (
+                (collection.get("uid") if isinstance(collection, dict) else None)
+                or (collection.get("collection") or {}).get("uid")
+                or (collection.get("collection") or {}).get("id")
+            )
+        except Exception:
+            imported_uid = None
+        _write_log("import_openapi", "success", {"imported_uid": bool(imported_uid)})
+        print(f"✅ Collection generated (import preview)")
+    else:
+        # We skipped import due to a resolved target UID
+        if target_uid:
+            print("🔹 Skipping Postman Import API because target collection UID is provided/resolved")
+            _write_log("import_openapi", "skipped", {"reason": "target_uid_provided"})
         # Try to extract a UID if Postman created the collection on import
         try:
             imported_uid = (
@@ -170,13 +221,12 @@ def main():
     print(f"✅ Collection written to {collection_path}")
     _write_log("write_collection_file", "success", {"path": str(collection_path)})
 
-    # Prefer an explicit env override, otherwise try to reuse any UID returned
-    # by the Import/OpenAPI (or Spec Hub) call so we update the existing
-    # imported collection instead of creating a duplicate.
+    # Prefer an explicit env override (resolved `target_uid`), otherwise try to reuse
+    # any UID from previous state or the import/generation step so we update the
+    # same collection instead of creating a duplicate.
     def _extract_uid(coll_obj):
         if not coll_obj or not isinstance(coll_obj, dict):
             return None
-        # common shapes: {"uid": ...} or {"collection": {"uid": ...}}
         return (
             coll_obj.get("uid")
             or (coll_obj.get("collection") or {}).get("uid")
@@ -184,34 +234,29 @@ def main():
             or (coll_obj.get("collection") or {}).get("id")
         )
 
-    env_collection_uid = os.getenv("POSTMAN_COLLECTION_UID")
-    # UID selection order:
-    # 1. POSTMAN_COLLECTION_UID env (set from secrets or workflow input)
-    # 2. previous run state.json stored collection_uid
-    # 3. UID returned by the import/spec hub call
     returned_uid = _extract_uid(collection)
     state_uid = prev_state.get("collection_uid")
     collection_uid = None
-    uid_source = None
+    uid_source = collection_uid_source or None
 
-    if env_collection_uid:
-        collection_uid = env_collection_uid
-        uid_source = "secrets_or_input"
-        print("Using collection UID from env/secret (POSTMAN_COLLECTION_UID)")
-        _write_log("collection_uid_source", "env_secret", {"uid": collection_uid})
+    if target_uid:
+        collection_uid = target_uid
+        uid_source = uid_source or "env_secret_resolved_uid"
+        print("Using resolved collection UID from env/secret (not printing value)")
+        _write_log("collection_uid_source", "env_secret_resolved_uid", {"note": "value omitted"})
     elif state_uid:
         collection_uid = state_uid
-        uid_source = "state.json"
+        uid_source = uid_source or "state.json"
         print("Using collection UID from state file (generated/state.json)")
-        _write_log("collection_uid_source", "state", {"uid": collection_uid})
+        _write_log("collection_uid_source", "state", {"note": "value omitted"})
     elif returned_uid:
         collection_uid = returned_uid
-        uid_source = "import_returned"
+        uid_source = uid_source or "import_returned"
         print("Using collection UID returned by import/spec hub (best-effort)")
-        _write_log("collection_uid_source", "returned", {"uid": collection_uid})
+        _write_log("collection_uid_source", "import_returned", {"note": "value omitted"})
     else:
         collection_uid = None
-        uid_source = "none"
+        uid_source = uid_source or "none"
         print("No collection UID found; will create a new collection")
         _write_log("collection_uid_source", "none", {"note": "no uid available; will create new collection"})
 
@@ -300,6 +345,19 @@ def main():
     print(f"✅ Collection upsert result: {collection_uid_result}")
     _write_log("upsert_collection", "success", {"uid": collection_uid_result})
 
+    # If we imported a collection earlier but we had a target_uid that we used instead,
+    # attempt to delete the imported collection to avoid duplicates (best-effort).
+    try:
+        if imported_uid and collection_uid and imported_uid != collection_uid:
+            try:
+                delete_collection(api_key, imported_uid)
+                _write_log("delete_imported_collection", "success", {"imported_uid": imported_uid})
+            except Exception as e:
+                _write_log("delete_imported_collection", "failed", {"imported_uid": imported_uid, "error": str(e)})
+    except Exception:
+        # non-fatal cleanup errors
+        pass
+
     # Record PATCH/PUT summary if we attempted a patch
     try:
         if patch_attempted:
@@ -381,6 +439,7 @@ def main():
             "spec_sha256": spec_sha256,
             "last_synced_at": datetime.now(timezone.utc).isoformat(),
             "collection_uid": collection_uid_result,
+            "collection_uid_source": uid_source,
             "environments": postman_ids.get("environments", {}),
         }
         # include spec_id if available from spec hub flow

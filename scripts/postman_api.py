@@ -1,4 +1,5 @@
 import requests
+import re
 
 BASE_URL = "https://api.getpostman.com"
 
@@ -276,6 +277,53 @@ def list_collections(api_key: str, workspace_id: str):
         raise RuntimeError(f"Postman list_collections failed: {resp.status_code} - {resp.text}")
     data = resp.json()
     return data.get("collections") or []
+
+
+def resolve_collection_uid(api_key: str, workspace_id: str, provided: str | None):
+    """Resolve a provided collection identifier to a Postman collection UID.
+
+    - If `provided` matches the UID pattern '^\d+-[0-9a-fA-F-]{36}$', return it as-is.
+    - If `provided` is a plain UUID (36 hex chars), search workspace collections for
+      a matching collection `id` and return its `uid` if found.
+    - Otherwise return None.
+    """
+    if not provided:
+        return None
+    provided = provided.strip()
+    # UID with numeric prefix, e.g. '17451434-553c9eed-4c98-4aaa-9f04-33df17b45eef'
+    if re.match(r"^\d+-[0-9a-fA-F\-]{36}$", provided):
+        return provided
+
+    # Plain UUID (36 hex chars)
+    if re.match(r"^[0-9a-fA-F\-]{36}$", provided):
+        cols = list_collections(api_key, workspace_id)
+        for entry in cols:
+            coll = entry.get("collection") if isinstance(entry, dict) else entry
+            # Postman may return `id` or `uid` for historical reasons
+            coll_id = (coll or {}).get("id") or (coll or {}).get("uid")
+            coll_uid = (coll or {}).get("uid") or (coll or {}).get("id")
+            if coll_id and coll_id.lower() == provided.lower():
+                return coll_uid
+            # Also try matching the top-level keys
+            if entry.get("id") and entry.get("id").lower() == provided.lower():
+                return entry.get("uid") or entry.get("id")
+        return None
+
+
+def collection_exists(api_key: str, collection_uid: str) -> bool:
+    """Return True if a collection with `collection_uid` exists, False if 404, else raise."""
+    if not collection_uid:
+        return False
+    url = f"{BASE_URL}/collections/{collection_uid}"
+    resp = requests.get(url, headers=headers(api_key), timeout=30)
+    if resp.status_code == 404:
+        return False
+    try:
+        resp.raise_for_status()
+    except requests.exceptions.HTTPError:
+        # For other HTTP errors, surface them to caller
+        raise RuntimeError(f"Postman collection_exists failed: {resp.status_code} - {resp.text}")
+    return True
 
 
 def get_collection_by_name(api_key: str, workspace_id: str, name: str):
