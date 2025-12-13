@@ -197,22 +197,22 @@ def main():
     if env_collection_uid:
         collection_uid = env_collection_uid
         uid_source = "secrets_or_input"
-        print("🔐 Using collection UID from secrets/input (POSTMAN_COLLECTION_UID)")
-        _write_log("collection_uid_source", "secrets", {"uid": collection_uid})
+        print("Using collection UID from env/secret (POSTMAN_COLLECTION_UID)")
+        _write_log("collection_uid_source", "env_secret", {"uid": collection_uid})
     elif state_uid:
         collection_uid = state_uid
         uid_source = "state.json"
-        print("📁 Using collection UID from generated/state.json")
+        print("Using collection UID from state file (generated/state.json)")
         _write_log("collection_uid_source", "state", {"uid": collection_uid})
     elif returned_uid:
         collection_uid = returned_uid
         uid_source = "import_returned"
-        print("🔎 Using collection UID returned by import/spec hub")
+        print("Using collection UID returned by import/spec hub (best-effort)")
         _write_log("collection_uid_source", "returned", {"uid": collection_uid})
     else:
         collection_uid = None
         uid_source = "none"
-        print("⚪ No UID found; creating new collection.")
+        print("No collection UID found; will create a new collection")
         _write_log("collection_uid_source", "none", {"note": "no uid available; will create new collection"})
 
     # Determine whether to perform a PATCH-style partial update

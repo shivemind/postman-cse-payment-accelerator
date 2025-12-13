@@ -7,6 +7,10 @@ on:
         description: 'Optional collection UID to target (overrides secret).'
         required: false
         default: ''
+      force:
+        description: 'Force regeneration (true/false)'
+        required: false
+        default: 'false'
   push:
     branches: [ main ]
   pull_request:
@@ -29,12 +33,36 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Prepare effective POSTMAN_COLLECTION_UID
+        id: prep_uid
+        # Use inputs first (manual override), then repo secret if present; write result to GITHUB_ENV and GITHUB_OUTPUT
+        env:
+          INPUT_COLLECTION_UID: ${{ inputs.collection_uid }}
+          SECRET_COLLECTION_UID: ${{ secrets.POSTMAN_COLLECTION_UID }}
+        run: |
+          if [ -n "$INPUT_COLLECTION_UID" ]; then
+            echo "POSTMAN_COLLECTION_UID=$INPUT_COLLECTION_UID" >> $GITHUB_ENV
+            echo "collection_uid=$INPUT_COLLECTION_UID" >> $GITHUB_OUTPUT
+            echo "Using workflow input collection_uid"
+          elif [ -n "$SECRET_COLLECTION_UID" ]; then
+            echo "POSTMAN_COLLECTION_UID=$SECRET_COLLECTION_UID" >> $GITHUB_ENV
+            echo "collection_uid=$SECRET_COLLECTION_UID" >> $GITHUB_OUTPUT
+            echo "Using repository secret POSTMAN_COLLECTION_UID"
+          else
+            # leave empty so the script can create a new collection on first run
+            echo "POSTMAN_COLLECTION_UID=" >> $GITHUB_ENV
+            echo "collection_uid=" >> $GITHUB_OUTPUT
+            echo "No collection UID provided; first-run may create a new collection"
+          fi
+
       - name: Run ingestion script
         env:
           POSTMAN_API_KEY: ${{ secrets.POSTMAN_API_KEY }}
           POSTMAN_WORKSPACE_ID: ${{ secrets.POSTMAN_WORKSPACE_ID }}
-          # Allow either an explicit workflow input or the repository secret to provide the authoritative collection UID
-          POSTMAN_COLLECTION_UID: ${{ inputs.collection_uid || secrets.POSTMAN_COLLECTION_UID }}
+          # POSTMAN_COLLECTION_UID is passed from the prepare step outputs to avoid premature evaluation
+          POSTMAN_COLLECTION_UID: ${{ steps.prep_uid.outputs.collection_uid }}
+          # Allow forcing via workflow input only for manual dispatches; default to 'false' otherwise
+          POSTMAN_FORCE: ${{ (github.event_name == 'workflow_dispatch' && inputs.force) || 'false' }}
           DEV_BASE_URL: ${{ secrets.DEV_BASE_URL }}
           QA_BASE_URL: ${{ secrets.QA_BASE_URL }}
           UAT_BASE_URL: ${{ secrets.UAT_BASE_URL }}
@@ -46,44 +74,46 @@ jobs:
           set -e
           python scripts/ingest_refund_api.py || (echo 'Ingestion failed' && exit 1)
 
-        - name: Publish collection UID to job summary
+      - name: Publish collection + environment UIDs to job summary
         if: always()
+        continue-on-error: true
         run: |
           python - <<'PY'
-    import json, os, sys
-    summary_path = os.environ.get('GITHUB_STEP_SUMMARY')
-    uid = None
-    state_path = 'generated/state.json'
-    ids_path = 'generated/postman_ids.json'
-    try:
-      if os.path.exists(state_path):
+import json, os
+summary = os.environ.get('GITHUB_STEP_SUMMARY')
+state_path = 'generated/state.json'
+ids_path = 'generated/postman_ids.json'
+uid = None
+envs = None
+try:
+    if os.path.exists(state_path):
         with open(state_path,'r',encoding='utf-8') as fh:
-          s = json.load(fh)
-          uid = s.get('collection_uid') or s.get('collection')
-      if not uid and os.path.exists(ids_path):
+            s = json.load(fh)
+            uid = s.get('collection_uid')
+            envs = s.get('environments')
+    if not uid and os.path.exists(ids_path):
         with open(ids_path,'r',encoding='utf-8') as fh:
-          j = json.load(fh)
-          uid = j.get('collection_uid')
-    except Exception:
-      uid = None
+            j = json.load(fh)
+            uid = j.get('collection_uid')
+            envs = j.get('environments')
+except Exception:
+    uid = None
+    envs = None
 
-    if uid:
-      line = f"Resolved Postman collection UID: {uid}\n"
-      print(line)
-      if summary_path:
-        with open(summary_path,'a',encoding='utf-8') as s:
-          s.write('### Postman collection\n')
-          s.write(f'- **Collection UID**: `{uid}`\n')
-    else:
-      # No UID found; instruct adding secret for idempotency
-      note = 'No collection UID was resolved. Add `POSTMAN_COLLECTION_UID` (repo secret) to make future runs idempotent.'
-      print(note)
-      if summary_path:
-        with open(summary_path,'a',encoding='utf-8') as s:
-          s.write('### Postman collection\n')
-          s.write('- **Collection UID**: _not found_\n')
-          s.write(f'- {note}\n')
-    PY
+if summary:
+    with open(summary,'a',encoding='utf-8') as s:
+        s.write('## Postman Upsert Results\n')
+        if uid:
+            s.write(f'- **Collection UID**: `{uid}`\n')
+        else:
+            s.write('- **Collection UID**: _not found_\n')
+            s.write('- Add `POSTMAN_COLLECTION_UID` (repo secret) to make future runs idempotent.\n')
+        if envs:
+            s.write('\n- **Environments**:\n')
+            for k,v in (envs.items() if isinstance(envs, dict) else []):
+                s.write(f'  - {k}: `{v}`\n')
+print('Wrote job summary (if available).')
+PY
 
       - name: Upload generated collection
         if: always()
