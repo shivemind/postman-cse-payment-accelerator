@@ -78,6 +78,9 @@ def main():
     except Exception:
         prev_hash = None
 
+    # Read any previously persisted collection UID (do not assume it's valid here)
+    state_uid = prev_state.get("collection_uid") if prev_state else None
+
     if prev_hash == spec_sha256 and not force_run:
         print("🔒 No spec drift detected; skipping Postman import/regen.")
         _write_log("spec_hash_check", "unchanged", {"spec_sha256": spec_sha256})
@@ -150,32 +153,42 @@ def main():
             print("⚠️ Spec Hub flow failed, falling back to Import API:", err)
             _write_log("create_spec", "failed", {"error": err})
 
-    # Only call the Import API when the user did NOT provide POSTMAN_COLLECTION_UID
+    # Decide creation/import behavior:
+    # - If POSTMAN_COLLECTION_UID (provided) is set, we MUST NOT call Import API.
+    # - If no provided UID but `state_uid` exists, reuse it (do not call Import API which may create new collections).
+    # - If neither provided nor state_uid exist, create an empty collection via the API and persist its UID.
     imported_uid = None
-    if collection is None and not provided:
-        print("🔹 Importing OpenAPI spec via Postman Import API")
-        _write_log("import_openapi_attempt", "starting", {"name": spec_name})
-        collection = import_openapi(api_key, workspace_id, spec_name, spec_content)
-        # Try to extract a UID if Postman created the collection on import
+    if collection is None and not provided and not state_uid:
+        # First-run case: create an empty collection and persist its UID so future runs reuse it.
+        from postman_api import create_empty_collection
+        print("🔹 Creating empty Postman collection (first-run)")
         try:
-            imported_uid = (
-                (collection.get("uid") if isinstance(collection, dict) else None)
-                or (collection.get("collection") or {}).get("uid")
-                or (collection.get("collection") or {}).get("id")
-            )
-        except Exception:
-            imported_uid = None
-        _write_log("import_openapi", "success", {"imported_uid": bool(imported_uid)})
-        print(f"✅ Collection generated (import preview)")
+            created_uid = create_empty_collection(api_key, workspace_id, "Payments – Refund API")
+            _write_log("create_empty_collection", "success", {"created": True})
+            print(f"CREATED COLLECTION UID: {created_uid}")
+            # Persist the created UID immediately to state.json so subsequent runs reuse it
+            state_obj = {
+                "spec_sha256": spec_sha256,
+                "last_synced_at": datetime.now(timezone.utc).isoformat(),
+                "collection_uid": created_uid,
+                "environments": prev_state.get("environments", {}) if prev_state else {}
+            }
+            state_file.write_text(json.dumps(state_obj, indent=2))
+            _write_log("state_write", "success", {"path": str(state_file)})
+            # Treat the created UID as the authoritative target for this run
+            target_uid = created_uid
+            collection_uid_source = "created_uid"
+        except Exception as e:
+            _write_log("create_empty_collection", "failed", {"error": str(e)})
+            raise
     else:
-        # If user provided POSTMAN_COLLECTION_UID, never call Import API (hard rule)
+        # Do not call Import API when a provided UID exists (hard rule), nor when we have a persisted state UID.
         if provided:
             print("🔹 Skipping Postman Import API because POSTMAN_COLLECTION_UID is present; will generate locally and upsert to provided UID")
             _write_log("import_openapi", "skipped", {"reason": "POSTMAN_COLLECTION_UID_present"})
         else:
-            # collection was already created by Spec Hub flow; no import needed
-            _write_log("import_openapi", "skipped", {"reason": "spec_hub_used"})
-        # If collection exists (e.g., from spec hub), try to extract its UID; otherwise imported_uid remains None
+            _write_log("import_openapi", "skipped", {"reason": "state_uid_present_or_spec_hub"})
+        # If collection was created by spec hub earlier, extract its UID
         try:
             imported_uid = (
                 (collection.get("uid") if isinstance(collection, dict) else None)
@@ -184,8 +197,6 @@ def main():
             )
         except Exception:
             imported_uid = None
-        # Log whether an import/generation produced a UID
-        _write_log("import_openapi", "skipped_or_existing", {"imported_uid": bool(imported_uid)})
         if collection:
             print(f"✅ Collection available (from spec hub or prior step)")
 

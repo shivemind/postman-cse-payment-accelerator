@@ -567,3 +567,30 @@ def create_environment(api_key, workspace_id, name, values):
     )
     r.raise_for_status()
     return r.json()
+
+
+def create_empty_collection(api_key: str, workspace_id: str, name: str) -> str:
+    """Create an empty Postman collection with the given name in the workspace and return its UID.
+
+    The collection created will include a minimal `info` block and an empty `item` list.
+    """
+    payload = {
+        "collection": {
+            "info": {
+                "name": name,
+                "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+            },
+            "item": []
+        }
+    }
+    url = f"{BASE_URL}/collections?workspace={workspace_id}"
+    resp = requests.post(url, headers=headers(api_key), json=payload, timeout=30)
+    try:
+        resp.raise_for_status()
+    except requests.exceptions.HTTPError:
+        raise RuntimeError(f"Postman create_empty_collection failed: {resp.status_code} - {resp.text}")
+    data = resp.json()
+    uid = data.get("collection", {}).get("uid") or data.get("collection", {}).get("id") or data.get("uid")
+    if not uid:
+        raise RuntimeError(f"Postman create_empty_collection did not return a uid: {data}")
+    return str(uid)
