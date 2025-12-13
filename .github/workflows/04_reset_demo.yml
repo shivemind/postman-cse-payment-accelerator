@@ -30,6 +30,18 @@ jobs:
         run: |
           if [[ "${{ github.event.inputs.confirm }}" != "RESET" ]]; then echo "Confirmation did not match 'RESET' - aborting" && exit 1; fi
 
+      # Download the latest postman_state artifact produced by the ingest job so
+      # the reset job can find the most-recent collection UID. The runner
+      # filesystem is ephemeral so we persist state via artifacts in the ingest
+      # workflow. Continue if no artifact is found so older setups without the
+      # artifact still work.
+      - name: Download postman_state artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: postman_state
+          path: generated
+        continue-on-error: true
+
       - name: Run reset script
         env:
           POSTMAN_API_KEY: ${{ secrets.POSTMAN_API_KEY }}

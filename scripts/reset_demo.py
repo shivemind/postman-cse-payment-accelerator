@@ -27,14 +27,28 @@ def main():
     workspace_id = env("POSTMAN_WORKSPACE_ID")
 
     ids_file = OUT / "postman_ids.json"
+    state_file = OUT / "state.json"
     collection_uid = None
     env_uids = {}
+    # If a secret override is provided, prefer it (explicit intent).
+    provided_uid = os.getenv("POSTMAN_COLLECTION_UID", "").strip() or None
+    if provided_uid:
+        collection_uid = provided_uid
 
-    if ids_file.exists():
+    # If no explicit UID provided, try postman_ids.json artifact first (created by ingest job)
+    if not collection_uid and ids_file.exists():
         try:
             obj = json.loads(ids_file.read_text())
             collection_uid = obj.get("collection_uid")
             env_uids = obj.get("environments") or {}
+        except Exception:
+            pass
+
+    # Next fallback: read generated/state.json which may contain a persisted bootstrap UID
+    if not collection_uid and state_file.exists():
+        try:
+            obj = json.loads(state_file.read_text())
+            collection_uid = obj.get("collection_uid")
         except Exception:
             pass
 
