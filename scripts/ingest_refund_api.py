@@ -68,23 +68,40 @@ def main():
 
     # Compute SHA256 of the spec to detect drift and avoid unnecessary churn
     state_file = OUT / "state.json"
-    spec_hash = hashlib.sha256(spec_content.encode("utf-8")).hexdigest()
+    spec_sha256 = hashlib.sha256(spec_content.encode("utf-8")).hexdigest()
     prev_hash = None
+    prev_state = {}
     try:
         if state_file.exists():
-            state_obj = json.loads(state_file.read_text())
-            prev_hash = state_obj.get("spec_hash")
+            prev_state = json.loads(state_file.read_text())
+            prev_hash = prev_state.get("spec_sha256")
     except Exception:
         prev_hash = None
 
-    if prev_hash == spec_hash and not force_run:
-        print("🔒 Spec unchanged (SHA256 match). Skipping regeneration and Postman updates.")
-        _write_log("spec_hash_check", "unchanged", {"spec_hash": spec_hash})
-        print("This is safe to run on every merge. It's idempotent and avoids churn.")
-        print("To force regeneration, run with `--force` or set `POSTMAN_FORCE=true`.")
-        return
+    if prev_hash == spec_sha256 and not force_run:
+        print("🔒 No spec drift detected; skipping Postman import/regen.")
+        _write_log("spec_hash_check", "unchanged", {"spec_sha256": spec_sha256})
+        # Verify environments exist; if missing, upsert them
+        try:
+            from postman_api import get_environment_by_name
+            missing = []
+            for name in ("Dev", "QA", "UAT", "Prod"):
+                env_name = f"Payments – Refund API – {name}"
+                uid = get_environment_by_name(api_key, workspace_id, env_name)
+                if not uid:
+                    missing.append(name)
+            if missing:
+                print(f"⚠️ Environments missing: {missing}. Upserting missing environments.")
+                # fall through to normal upsert flow to create missing envs
+            else:
+                print("This is safe to run on every merge. It's idempotent and avoids churn.")
+                print("To force regeneration, run with `--force` or set `POSTMAN_FORCE=true`.")
+                return
+        except Exception:
+            # If verification fails, proceed with normal flow to be safe
+            pass
     else:
-        _write_log("spec_hash_check", "changed", {"prev": prev_hash, "now": spec_hash})
+        _write_log("spec_hash_check", "changed", {"prev": prev_hash, "now": spec_sha256})
 
     # Choose flow: Spec Hub (create_spec -> generate_collection) or Import API.
     use_spec_hub = os.getenv("USE_SPEC_HUB", "false").lower() in ("1", "true", "yes")
@@ -264,7 +281,19 @@ def main():
 
     # Persist spec hash/state so future runs can skip work if nothing changed
     try:
-        state_obj = {"spec_hash": spec_hash, "updated_at": datetime.now(timezone.utc).isoformat(), "collection_uid": collection_uid_result}
+        state_obj = {
+            "spec_sha256": spec_sha256,
+            "last_synced_at": datetime.now(timezone.utc).isoformat(),
+            "collection_uid": collection_uid_result,
+            "environments": postman_ids.get("environments", {}),
+        }
+        # include spec_id if available from spec hub flow
+        try:
+            if 'spec_id' in locals() and spec_id:
+                state_obj["spec_id"] = spec_id
+        except Exception:
+            pass
+
         state_file.write_text(json.dumps(state_obj, indent=2))
         _write_log("state_write", "success", {"path": str(state_file)})
     except Exception as e:

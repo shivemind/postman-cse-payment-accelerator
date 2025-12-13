@@ -82,6 +82,16 @@ target/
 profile_default/
 ipython_config.py
 
+# Python
+__pycache__/
+*.pyc
+
+# Generated Postman runtime artifacts
+generated/postman_actions.log
+generated/state.json
+generated/postman_ids.json
+generated/environments/*.environment.json
+
 # pyenv
 #   For a library or package, you might want to ignore these files since the code is
 #   intended to run in multiple environments; otherwise, check them in:

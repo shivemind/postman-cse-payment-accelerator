@@ -109,6 +109,17 @@ Automation pattern summary:
   - Add a CI job (GitHub Actions) to run ingestion for all specs in a matrix.
   - Add a `--dry-run` flag to `ingest_refund_api.py` to preview actions without calling Postman.
 
+## Robust sync (idempotent + drift detection)
+
+This project includes a lightweight drift-detection mechanism so the ingestion script is safe to run on every merge:
+
+- The script computes a SHA256 of the OpenAPI spec (default: `specs/payment-refund-api-openapi.yaml`).
+- State is persisted to `generated/state.json` and includes `spec_sha256`, `last_synced_at`, `collection_uid`, and environment UIDs.
+- If the spec hash matches the persisted value the script will verify environments exist and skip re-importing/regenerating the collection.
+- Use `--force` or `POSTMAN_FORCE=true` to bypass the check and force a full sync.
+
+This keeps Postman workspaces tidy (no duplicates) and avoids unnecessary churn during CI runs.
+
 ---
 
 If you'd like, I can also:

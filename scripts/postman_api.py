@@ -188,6 +188,30 @@ def get_collection(api_key: str, collection_uid: str):
     return data.get("collection") or data
 
 
+def list_environments(api_key: str, workspace_id: str):
+    """List environments in a workspace. Returns a list of environment dicts."""
+    url = f"{BASE_URL}/environments?workspace={workspace_id}"
+    resp = requests.get(url, headers=headers(api_key), timeout=30)
+    try:
+        resp.raise_for_status()
+    except requests.exceptions.HTTPError:
+        raise RuntimeError(f"Postman list_environments failed: {resp.status_code} - {resp.text}")
+    data = resp.json()
+    return data.get("environments") or []
+
+
+def get_environment_by_name(api_key: str, workspace_id: str, name: str):
+    """Return the UID of an environment in the workspace by its name, or None."""
+    if not name:
+        return None
+    envs = list_environments(api_key, workspace_id)
+    for e in envs:
+        # Postman returns environment objects with `name` and `uid`/`id` keys
+        if e.get("name") == name:
+            return e.get("uid") or e.get("id")
+    return None
+
+
 def sync_linked_collections(api_key: str, workspace_id: str, collection: dict):
     """Sync any linked collections declared in the collection payload.
 
@@ -314,6 +338,16 @@ def openapi_to_collection(raw_spec: str, name: str):
 def upsert_environment(api_key: str, workspace_id: str, env_payload: dict, env_uid: str | None = None):
     """Create or update an environment in Postman. Returns the environment UID or response body."""
     headers_ = headers(api_key)
+    # If no env_uid provided, attempt to find an existing environment by name
+    if not env_uid:
+        try:
+            existing = get_environment_by_name(api_key, workspace_id, env_payload.get("name"))
+            if existing:
+                env_uid = existing
+        except Exception:
+            # fall through to create if lookup fails
+            env_uid = None
+
     if env_uid:
         url = f"{BASE_URL}/environments/{env_uid}"
         resp = requests.put(url, headers=headers_, json={"environment": env_payload}, timeout=30)
