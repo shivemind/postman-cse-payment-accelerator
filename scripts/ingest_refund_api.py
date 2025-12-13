@@ -132,6 +132,13 @@ def main():
             # cannot be resolved in this workspace, refuse to create a new collection.
             _write_log("collection_uid_resolution", "not_found", {"source": "env", "reason": reason})
             print("FATAL: POSTMAN_COLLECTION_UID is set but could not be resolved/found in this workspace for this API key. Refusing to create a new collection.")
+            print("")
+            print("Possible causes:")
+            print(" - Your POSTMAN_API_KEY likely does not have access to the workspace or the collection UID.")
+            print(" - Verify POSTMAN_API_KEY, POSTMAN_WORKSPACE_ID, and POSTMAN_COLLECTION_UID refer to the same Postman account/workspace.")
+            print("Next steps:")
+            print(" - Run 'python scripts/diagnose_postman_access.py' in CI or locally to inspect workspace and collection visibility.")
+            print(" - If the UID is correct, ensure the API key belongs to the same Postman user and has access to the workspace.")
             sys.exit(1)
 
     use_spec_hub = os.getenv("USE_SPEC_HUB", "false").lower() in ("1", "true", "yes")
@@ -160,8 +167,17 @@ def main():
     imported_uid = None
     if collection is None and not provided and not state_uid:
         # First-run case: create an empty collection and persist its UID so future runs reuse it.
+        # Bootstrapping a new collection is only allowed when explicitly enabled
+        allow_bootstrap = os.getenv("POSTMAN_ALLOW_BOOTSTRAP_CREATE", "false").lower() in ("1", "true", "yes")
+        if not allow_bootstrap:
+            _write_log("bootstrap_attempt", "disabled", {"note": "POSTMAN_ALLOW_BOOTSTRAP_CREATE not enabled"})
+            print("FATAL: No POSTMAN_COLLECTION_UID provided and no persisted UID found.")
+            print("Bootstrap creation of a new collection is disabled by default.")
+            print("To allow creating a new collection set POSTMAN_ALLOW_BOOTSTRAP_CREATE=true in CI, or supply POSTMAN_COLLECTION_UID.")
+            sys.exit(1)
+
         from postman_api import create_empty_collection
-        print("🔹 Creating empty Postman collection (first-run)")
+        print("🔹 Creating empty Postman collection (first-run, bootstrap enabled)")
         try:
             created_uid = create_empty_collection(api_key, workspace_id, "Payments – Refund API")
             _write_log("create_empty_collection", "success", {"created": True})

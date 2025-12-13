@@ -81,6 +81,13 @@ jobs:
             echo "POSTMAN_COLLECTION_UID is not set (first run will create a new collection)"
           fi
 
+      - name: Diagnose Postman access
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Running Postman access diagnostics"
+          python scripts/diagnose_postman_access.py
+
       - name: Run ingestion
         shell: bash
         run: |
