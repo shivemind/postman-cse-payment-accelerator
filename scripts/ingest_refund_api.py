@@ -249,6 +249,14 @@ def main():
         }
     })
 
+    # Inject linked collection UIDs from env var POSTMAN_LINKED_COLLECTION_UIDS (CI-safe)
+    linked_env = os.getenv("POSTMAN_LINKED_COLLECTION_UIDS", "").strip()
+    if linked_env:
+        uids = [u.strip() for u in linked_env.split(",") if u.strip()]
+        if uids:
+            coll_for_write["linked_collections"] = uids
+            _write_log("linked_collections_injected", "success", {"count": len(uids)})
+
     # Upsert the collection to Postman (use existing UID if provided)
     collection_path = OUT / "refund.collection.json"
     # Write the converted or imported collection (prefer collection object wrapped)
@@ -324,16 +332,7 @@ def main():
             print("⚠️ PATCH failed, will consider PUT upsert:", e)
             _write_log("patch_collection", "failed", {"error": str(e)})
 
-        # Always try to sync linked collections if requested
-        if do_sync_linked:
-            try:
-                from postman_api import sync_linked_collections
-                linked_results = sync_linked_collections(api_key, workspace_id, coll_for_write)
-                _write_log("sync_linked_collections", "success", {"results": linked_results})
-                print(f"✅ Synced {len(linked_results)} linked collections")
-            except Exception as e:
-                _write_log("sync_linked_collections", "failed", {"error": str(e)})
-                print("⚠️ Failed to sync linked collections:", e)
+        # linked collection sync will occur once after the PATCH/PUT decision below
 
         # Compute item structure fingerprint and decide whether to PUT (structure change)
         import json as _j
@@ -393,6 +392,21 @@ def main():
             patch_attempted = False
             patch_succeeded = False
             patch_reason = "no_existing_uid"
+    # After we've applied PATCH or PUT (as needed), optionally sync linked collections
+    # but only when PATCH flow was used and the sync option is enabled. This
+    # ensures linked collections are synced exactly once and only as part of
+    # the PATCH/PUT decision path.
+    if use_patch and do_sync_linked and patch_attempted and (patch_succeeded or put_performed):
+        try:
+            from postman_api import sync_linked_collections
+            linked_results = sync_linked_collections(api_key, workspace_id, coll_for_write)
+            _write_log("sync_linked_collections", "success", {"results": linked_results})
+            if linked_results:
+                print(f"✅ Synced {len(linked_results)} linked collections")
+        except Exception as e:
+            _write_log("sync_linked_collections", "failed", {"error": str(e)})
+            print("⚠️ Failed to sync linked collections:", e)
+
     # coll_result may be a UID string or a richer object; normalize to uid
     collection_uid_result = None
     if isinstance(coll_result, str):
@@ -434,16 +448,8 @@ def main():
         # Older runs may not have patch flags; ignore
         pass
 
-    # Sync any linked collections declared inside the collection payload
-    try:
-        from postman_api import sync_linked_collections
-        linked_results = sync_linked_collections(api_key, workspace_id, coll_for_write)
-        if linked_results:
-            _write_log("sync_linked_collections", "success", {"results": linked_results})
-            print(f"✅ Synced {len(linked_results)} linked collections")
-    except Exception as e:
-        _write_log("sync_linked_collections", "failed", {"error": str(e)})
-        print("⚠️ Failed to sync linked collections:", e)
+    # (linked collections sync removed here to ensure it only runs as part of the
+    # PATCH/PUT decision path above when requested)
 
     environments = {
         "Dev": env("DEV_BASE_URL"),
