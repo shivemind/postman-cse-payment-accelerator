@@ -24,18 +24,26 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
+        shell: bash
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Run ingestion
-        run: |
-          python .\scripts\ingest_refund_api.py
         shell: bash
+        run: |
+          set -euo pipefail
+          pwd
+          ls -la
+          ls -la scripts/
+          mkdir -p generated generated/environments
+          python scripts/ingest_refund_api.py
 
       - name: Show last log lines
         if: always()
-        run: |
-          echo '--- postman actions log (tail) ---'
-          tail -n 40 generated/postman_actions.log || true
         shell: bash
+        run: |
+          set -euo pipefail
+          echo '--- postman actions log (tail) ---'
+          test -f generated/postman_actions.log && tail -n 40 generated/postman_actions.log || echo "No postman_actions.log yet"

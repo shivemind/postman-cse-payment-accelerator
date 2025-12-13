@@ -94,6 +94,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          pwd
+          ls -la
+          ls -la scripts/
           python scripts/ingest_refund_api.py || (echo 'Ingestion failed' && exit 1)
 
       - name: Publish collection + environment UIDs to job summary
