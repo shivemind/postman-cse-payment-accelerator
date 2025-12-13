@@ -156,9 +156,9 @@ def main():
             print("⚠️ Spec Hub flow failed, falling back to Import API:", err)
             _write_log("create_spec", "failed", {"error": err})
 
-    # Only call the Import API when we don't have a known target UID
+    # Only call the Import API when the user did NOT provide POSTMAN_COLLECTION_UID
     imported_uid = None
-    if collection is None and not target_uid:
+    if collection is None and not provided:
         print("🔹 Importing OpenAPI spec via Postman Import API")
         _write_log("import_openapi_attempt", "starting", {"name": spec_name})
         collection = import_openapi(api_key, workspace_id, spec_name, spec_content)
@@ -174,11 +174,14 @@ def main():
         _write_log("import_openapi", "success", {"imported_uid": bool(imported_uid)})
         print(f"✅ Collection generated (import preview)")
     else:
-        # We skipped import due to a resolved target UID
-        if target_uid:
-            print("🔹 Skipping Postman Import API because target collection UID is provided/resolved")
-            _write_log("import_openapi", "skipped", {"reason": "target_uid_provided"})
-        # Try to extract a UID if Postman created the collection on import
+        # If user provided POSTMAN_COLLECTION_UID, never call Import API (hard rule)
+        if provided:
+            print("🔹 Skipping Postman Import API because POSTMAN_COLLECTION_UID is present; will generate locally and upsert to provided UID")
+            _write_log("import_openapi", "skipped", {"reason": "POSTMAN_COLLECTION_UID_present"})
+        else:
+            # collection was already created by Spec Hub flow; no import needed
+            _write_log("import_openapi", "skipped", {"reason": "spec_hub_used"})
+        # If collection exists (e.g., from spec hub), try to extract its UID; otherwise imported_uid remains None
         try:
             imported_uid = (
                 (collection.get("uid") if isinstance(collection, dict) else None)
@@ -187,8 +190,10 @@ def main():
             )
         except Exception:
             imported_uid = None
-        _write_log("import_openapi", "success", {"imported_uid": imported_uid})
-        print(f"✅ Collection generated")
+        # Log whether an import/generation produced a UID
+        _write_log("import_openapi", "skipped_or_existing", {"imported_uid": bool(imported_uid)})
+        if collection:
+            print(f"✅ Collection available (from spec hub or prior step)")
 
     # If the import/generation returned a collection with no `item` entries,
     # fall back to a local converter to ensure the collection contains requests.
