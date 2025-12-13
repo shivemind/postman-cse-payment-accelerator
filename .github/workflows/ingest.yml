@@ -15,6 +15,10 @@ jobs:
       POSTMAN_API_KEY: ${{ secrets.POSTMAN_API_KEY }}
       POSTMAN_WORKSPACE_ID: ${{ secrets.POSTMAN_WORKSPACE_ID }}
       POSTMAN_COLLECTION_UID: ${{ secrets.POSTMAN_COLLECTION_UID }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      AWS_SPEC_S3_URI: ${{ secrets.AWS_SPEC_S3_URI }}
       DEV_BASE_URL: ${{ secrets.DEV_BASE_URL }}
       QA_BASE_URL: ${{ secrets.QA_BASE_URL }}
       UAT_BASE_URL: ${{ secrets.UAT_BASE_URL }}
@@ -40,6 +44,14 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Install AWS CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y awscli
+          aws --version
 
       - name: Pre-flight checks and diagnostics
         shell: bash
@@ -78,6 +90,11 @@ jobs:
           ls -la
           ls -la scripts/
           mkdir -p generated generated/environments
+          # If AWS_SPEC_S3_URI is provided, fetch the spec from S3 first
+          if [ -n "${AWS_SPEC_S3_URI:-}" ]; then
+            echo "Fetching OpenAPI spec from S3..."
+            python scripts/fetch_spec_aws.py
+          fi
           python scripts/ingest_refund_api.py
 
       - name: Show last log lines
