@@ -106,48 +106,30 @@ def main():
     # Choose flow: Spec Hub (create_spec -> generate_collection) or Import API.
     # Resolve target collection UID (support numeric-prefixed UID or plain UUID id)
     from postman_api import resolve_collection_uid, collection_exists, delete_collection
-    import re
-
-    def is_numeric_prefixed_uid(uid: str) -> bool:
-        return bool(re.match(r"^\d+-[0-9a-fA-F\-]{36}$", uid))
 
     provided_raw = os.getenv("POSTMAN_COLLECTION_UID", "")
     provided = provided_raw.strip() if provided_raw else None
     target_uid = None
     collection_uid_source = None
     if provided:
-        # If the provided UID already matches the numeric-prefixed Postman UID
-        # format, treat it as authoritative and do NOT attempt workspace lookups
-        # or existence checks which can produce false negatives in CI.
-        if is_numeric_prefixed_uid(provided):
-            target_uid = provided
-            collection_uid_source = "env_secret_numeric_prefixed"
-            _write_log("collection_uid_resolution", "accepted", {"source": "env", "note": "numeric_prefixed_uid_used"})
+        # Resolve the provided POSTMAN_COLLECTION_UID to a workspace collection UID.
+        try:
+            resolved_uid, reason = resolve_collection_uid(api_key, workspace_id, provided)
+        except Exception as e:
+            _write_log("collection_uid_resolution", "error", {"error": str(e)})
+            resolved_uid = None
+            reason = "error"
+
+        if resolved_uid:
+            target_uid = resolved_uid
+            collection_uid_source = reason or "env_resolved"
+            _write_log("collection_uid_resolution", "verified_existing" if reason == "verified_existing" else "recovered", {"source": "env", "reason": reason})
         else:
-            try:
-                resolved = resolve_collection_uid(api_key, workspace_id, provided)
-                if resolved:
-                    # verify the resolved uid actually exists; if not, treat as not found (do not fail)
-                    try:
-                        if collection_exists(api_key, resolved):
-                            target_uid = resolved
-                            collection_uid_source = "env_secret_resolved_uid"
-                            _write_log("collection_uid_resolution", "resolved", {"source": "env", "note": "resolved_to_uid"})
-                        else:
-                            collection_uid_source = "env_secret_not_found"
-                            _write_log("collection_uid_resolution", "not_found", {"source": "env"})
-                    except Exception as e:
-                        # If existence check fails, treat as not found but log
-                        collection_uid_source = "env_secret_check_error"
-                        _write_log("collection_uid_resolution", "error", {"error": str(e)})
-                        target_uid = None
-                else:
-                    # Provided value did not match expected formats or could not be resolved
-                    collection_uid_source = "env_secret_invalid"
-                    _write_log("collection_uid_resolution", "invalid", {"source": "env"})
-            except Exception as e:
-                collection_uid_source = "env_secret_resolution_error"
-                _write_log("collection_uid_resolution", "error", {"error": str(e)})
+            # Fail fast: if user explicitly provided POSTMAN_COLLECTION_UID but it
+            # cannot be resolved in this workspace, refuse to create a new collection.
+            _write_log("collection_uid_resolution", "not_found", {"source": "env", "reason": reason})
+            print("FATAL: POSTMAN_COLLECTION_UID is set but could not be resolved/found in this workspace for this API key. Refusing to create a new collection.")
+            sys.exit(1)
 
     use_spec_hub = os.getenv("USE_SPEC_HUB", "false").lower() in ("1", "true", "yes")
     collection = None
@@ -302,11 +284,9 @@ def main():
         print("No collection UID found; will create a new collection")
         _write_log("collection_uid_source", "none", {"note": "no uid available; will create new collection"})
 
-    # If the user provided a numeric-prefixed POSTMAN_COLLECTION_UID, it must be authoritative.
-    if provided and is_numeric_prefixed_uid(provided):
-        if collection_uid != provided:
-            # Fail fast: do NOT fallback to POST when a numeric-prefixed UID was explicitly provided
-            raise RuntimeError("POSTMAN_COLLECTION_UID is numeric-prefixed and must be used as the target UID; aborting to avoid creating a duplicate collection.")
+    # If the user provided POSTMAN_COLLECTION_UID it must have been resolved above
+    # and collection_uid will be set to the resolved value. At this point we
+    # should not attempt to create a new collection when POSTMAN_COLLECTION_UID was set.
 
     # Determine whether to perform a PATCH-style partial update
     use_patch = os.getenv("POSTMAN_USE_PATCH", "false").lower() in ("1", "true", "yes")
@@ -357,14 +337,28 @@ def main():
         if not patch_succeeded:
             # If PATCH failed completely, perform a PUT upsert to ensure collection state
             print("Item structure change unknown because PATCH failed; performing PUT upsert")
-            coll_result = upsert_collection(api_key, workspace_id, coll_for_write, collection_uid)
+            try:
+                coll_result = upsert_collection(api_key, workspace_id, coll_for_write, collection_uid)
+            except RuntimeError as e:
+                if str(e).startswith("FATAL_UID_NOT_FOUND"):
+                    _write_log("fatal_uid_not_found", "failed", {"error": str(e)})
+                    print("FATAL: provided POSTMAN_COLLECTION_UID not found or inaccessible. Aborting to avoid creating a new collection.")
+                    sys.exit(1)
+                raise
             put_performed = True
             patch_reason = "patch_failed"
         else:
             if item_hash and prev_item_hash != item_hash:
                 print("Item structure changed, performing PUT upsert")
                 _write_log("item_hash_check", "changed", {"prev": prev_item_hash, "now": item_hash})
-                coll_result = upsert_collection(api_key, workspace_id, coll_for_write, collection_uid)
+                try:
+                    coll_result = upsert_collection(api_key, workspace_id, coll_for_write, collection_uid)
+                except RuntimeError as e:
+                    if str(e).startswith("FATAL_UID_NOT_FOUND"):
+                        _write_log("fatal_uid_not_found", "failed", {"error": str(e)})
+                        print("FATAL: provided POSTMAN_COLLECTION_UID not found or inaccessible. Aborting to avoid creating a new collection.")
+                        sys.exit(1)
+                    raise
                 put_performed = True
                 patch_reason = "structure_changed"
             else:
@@ -376,7 +370,14 @@ def main():
 
     else:
         # No PATCH requested or no existing UID — full upsert
-        coll_result = upsert_collection(api_key, workspace_id, coll_for_write, collection_uid)
+        try:
+            coll_result = upsert_collection(api_key, workspace_id, coll_for_write, collection_uid)
+        except RuntimeError as e:
+            if str(e).startswith("FATAL_UID_NOT_FOUND"):
+                _write_log("fatal_uid_not_found", "failed", {"error": str(e)})
+                print("FATAL: provided POSTMAN_COLLECTION_UID not found or inaccessible. Aborting to avoid creating a new collection.")
+                sys.exit(1)
+            raise
         if use_patch and not collection_uid:
             patch_attempted = False
             patch_succeeded = False

@@ -150,6 +150,12 @@ def upsert_collection(api_key: str, workspace_id: str, coll_payload: dict, colle
                 coll["item"] = coll.get("items") or []
         resp = requests.post(url, headers=headers_, json=body, timeout=30)
 
+    # Handle 404 specifically when caller provided a collection_uid: this means
+    # the caller attempted to PUT to a collection that doesn't exist or is
+    # inaccessible with the API key. In that case we must NOT fallback to POST;
+    # fail fast so callers can decide.
+    if resp.status_code == 404 and collection_uid:
+        raise RuntimeError(f"FATAL_UID_NOT_FOUND: collection_uid provided but not found or not accessible: {collection_uid}")
     try:
         resp.raise_for_status()
     except requests.exceptions.HTTPError:
@@ -282,32 +288,61 @@ def list_collections(api_key: str, workspace_id: str):
 def resolve_collection_uid(api_key: str, workspace_id: str, provided: str | None):
     """Resolve a provided collection identifier to a Postman collection UID.
 
-    - If `provided` matches the UID pattern '^\d+-[0-9a-fA-F-]{36}$', return it as-is.
-    - If `provided` is a plain UUID (36 hex chars), search workspace collections for
-      a matching collection `id` and return its `uid` if found.
-    - Otherwise return None.
+    Returns a tuple `(resolved_uid_or_None, reason)` where `reason` is one of:
+      - 'verified_existing' when provided uid exists as-is
+      - 'recovered_by_suffix' when a suffix match was found
+      - 'resolved_exact' when a plain UUID resolved by exact match
+      - 'not_found' when no matching collection is found
+      - 'invalid_format' when the provided string doesn't match expected patterns
     """
     if not provided:
-        return None
+        return None, None
     provided = provided.strip()
-    # UID with numeric prefix, e.g. '17451434-553c9eed-4c98-4aaa-9f04-33df17b45eef'
-    if re.match(r"^\d+-[0-9a-fA-F\-]{36}$", provided):
-        return provided
 
-    # Plain UUID (36 hex chars)
+    def _extract_uid_from_entry(entry):
+        coll = entry.get("collection") if isinstance(entry, dict) else entry
+        if not coll:
+            return None
+        return coll.get("uid") or coll.get("id") or entry.get("uid") or entry.get("id")
+
+    # Case 1: numeric-prefixed UID (e.g. '17451434-<uuid>')
+    if re.match(r"^\d+-[0-9a-fA-F\-]{36}$", provided):
+        # Verify existence directly
+        try:
+            if collection_exists(api_key, provided):
+                return provided, "verified_existing"
+        except Exception:
+            # If existence check errors, continue to attempt suffix recovery
+            pass
+        # Attempt recovery by matching suffix after the first dash
+        try:
+            suffix = provided.split("-", 1)[1]
+            cols = list_collections(api_key, workspace_id)
+            for entry in cols:
+                uid = _extract_uid_from_entry(entry)
+                if uid and uid.lower().endswith(suffix.lower()):
+                    return uid, "recovered_by_suffix"
+        except Exception:
+            pass
+        return None, "not_found"
+
+    # Case 2: plain UUID
     if re.match(r"^[0-9a-fA-F\-]{36}$", provided):
-        cols = list_collections(api_key, workspace_id)
-        for entry in cols:
-            coll = entry.get("collection") if isinstance(entry, dict) else entry
-            # Postman may return `id` or `uid` for historical reasons
-            coll_id = (coll or {}).get("id") or (coll or {}).get("uid")
-            coll_uid = (coll or {}).get("uid") or (coll or {}).get("id")
-            if coll_id and coll_id.lower() == provided.lower():
-                return coll_uid
-            # Also try matching the top-level keys
-            if entry.get("id") and entry.get("id").lower() == provided.lower():
-                return entry.get("uid") or entry.get("id")
-        return None
+        try:
+            cols = list_collections(api_key, workspace_id)
+            for entry in cols:
+                uid = _extract_uid_from_entry(entry)
+                if not uid:
+                    continue
+                if uid.lower() == provided.lower():
+                    return uid, "resolved_exact"
+                if uid.lower().endswith(provided.lower()):
+                    return uid, "resolved_suffix"
+        except Exception:
+            pass
+        return None, "not_found"
+
+    return None, "invalid_format"
 
 
 def collection_exists(api_key: str, collection_uid: str) -> bool:
@@ -321,7 +356,6 @@ def collection_exists(api_key: str, collection_uid: str) -> bool:
     try:
         resp.raise_for_status()
     except requests.exceptions.HTTPError:
-        # For other HTTP errors, surface them to caller
         raise RuntimeError(f"Postman collection_exists failed: {resp.status_code} - {resp.text}")
     return True
 
