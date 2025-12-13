@@ -9,6 +9,33 @@ def headers(api_key: str):
         "Content-Type": "application/json"
     }
 
+
+def sanitize_collection_for_patch(collection: dict) -> dict:
+    """Return a deep-copied collection suitable for PATCH: strip info.schema if present.
+
+    This ensures we don't mutate the original collection object which may be
+    reused for PUT or for writing to disk.
+    """
+    import copy as _copy
+    if not collection or not isinstance(collection, dict):
+        return collection
+    sanitized = _copy.deepcopy(collection)
+    try:
+        info = None
+        if "collection" in sanitized and isinstance(sanitized["collection"], dict):
+            info = sanitized["collection"].get("info")
+        elif isinstance(sanitized, dict):
+            info = sanitized.get("info")
+        if isinstance(info, dict) and "schema" in info:
+            # remove the schema key for PATCH payloads only
+            del info["schema"]
+            # lightweight debug; do not print secrets or UIDs
+            print("DEBUG: stripped collection.info.schema for PATCH")
+    except Exception:
+        # Be defensive: if sanitization fails, return the deepcopy unchanged
+        pass
+    return sanitized
+
 def create_spec(api_key, workspace_id, name, raw_spec, version):
     # Try a few payload shapes and contentType values to find what the API accepts.
     content_types = ("yaml", "openapi", "application/yaml")
@@ -205,6 +232,8 @@ def patch_collection(api_key: str, collection_uid: str, partial_body: dict):
 
     attempts = [ (True, True), (False, True), (False, False) ]
     last_exc = None
+    # Work on a sanitized copy for PATCH so we do not send info.schema (Postman rejects it)
+    sanitized_coll = sanitize_collection_for_patch(coll) if isinstance(coll, dict) else coll
     for include_event, include_variable in attempts:
         payload = make_payload(include_event=include_event, include_variable=include_variable)
         try:

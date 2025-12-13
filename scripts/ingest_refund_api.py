@@ -8,6 +8,7 @@ import hashlib
 import sys
 import traceback
 import json as _json
+import copy
 from postman_api import (
     import_openapi,
     create_environment,
@@ -383,8 +384,28 @@ def main():
         patch_attempted = True
         try:
             from postman_api import patch_collection_metadata_only
+            # Prepare a sanitized deep-copy for PATCH: Postman rejects
+            # `collection.info.schema` in metadata-only PATCH requests.
+            patch_payload = copy.deepcopy(coll_for_write)
+            schema_removed = False
+            try:
+                if isinstance(patch_payload, dict) and patch_payload.get("info") and "schema" in patch_payload["info"]:
+                    del patch_payload["info"]["schema"]
+                    schema_removed = True
+            except Exception:
+                # Defensive: if deletion fails, proceed to let PATCH fail and be handled below
+                schema_removed = False
+
+            # Self-check: ensure sanitized payload does not contain info.schema
+            if isinstance(patch_payload, dict) and patch_payload.get("info") and "schema" in patch_payload["info"]:
+                raise RuntimeError("Sanitization failed: PATCH payload still contains info.schema")
+
+            _write_log("patch_payload_sanitized", "success", {"schema_removed": bool(schema_removed)})
+            if schema_removed:
+                print("🔹 PATCH payload sanitized: removed collection.info.schema")
+
             # Attempt a metadata-only PATCH (never sends `item`). Returns UID on success.
-            coll_result = patch_collection_metadata_only(api_key, collection_uid, coll_for_write)
+            coll_result = patch_collection_metadata_only(api_key, collection_uid, patch_payload)
             patch_succeeded = True
             print("✅ PATCH (metadata-only) succeeded")
             _write_log("patch_collection", "success", {"uid": collection_uid})
