@@ -129,60 +129,45 @@ def main():
             collection_uid_source = reason or "env_resolved"
             _write_log("collection_uid_resolution", "verified_existing" if reason == "verified_existing" else "recovered", {"source": "env", "reason": reason})
         else:
-            # If the provided UID cannot be resolved, check if a previous run
-            # created and persisted a collection UID via state.json. In that
-            # case prefer the persisted (created) UID so future runs remain
-            # deterministic and do not recreate collections repeatedly.
+            # Provided UID could not be resolved. Instead of failing the run,
+            # create a new collection and persist it so the pipeline self-heals
+            # after a reset. Prefer using any previously persisted created UID
+            # if present, otherwise create a fresh collection now.
             _write_log("collection_uid_resolution", "not_found", {"source": "env", "reason": reason})
 
             prev_created_uid = prev_state.get("collection_uid") if prev_state else None
             prev_created_source = prev_state.get("collection_uid_source") if prev_state else None
             if prev_created_uid and isinstance(prev_created_source, str) and prev_created_source.startswith("created"):
-                # A prior bootstrap run created the collection; prefer that persisted UID.
+                # Use previously persisted created UID to remain deterministic
                 target_uid = prev_created_uid
                 collection_uid_source = "state_created_preferred"
                 _write_log("collection_uid_resolution", "using_persisted_bootstrap_uid", {"note": "provided env invalid; using persisted created uid", "uid_omitted": True})
                 print("🔹 Provided POSTMAN_COLLECTION_UID could not be resolved, but a previously created UID exists in generated/state.json; using that persisted UID (value omitted).")
             else:
-                # No persisted UID to prefer. Offer explicit bootstrap when allowed.
-                allow_bootstrap = os.getenv("POSTMAN_ALLOW_BOOTSTRAP_CREATE", "false").lower() in ("1", "true", "yes")
-                if not allow_bootstrap:
-                    print("FATAL: POSTMAN_COLLECTION_UID is set but could not be resolved/found in this workspace for this API key. Refusing to create a new collection.")
-                    print("")
-                    print("Likely cause:")
-                    print(" - The collection UID no longer exists in the workspace (it may have been deleted/reset).")
-                    print("")
-                    print("Fix options:")
-                    print(" - Clear the POSTMAN_COLLECTION_UID secret so the pipeline can create a new UID via state.json (recommended for one-time bootstrap).")
-                    print(" - Or enable one-time bootstrap by setting POSTMAN_ALLOW_BOOTSTRAP_CREATE=true in CI to allow this run to create a new collection.")
-                    print("")
-                    print("Diagnostics:")
-                    print(" - Run 'python scripts/diagnose_postman_access.py' to inspect workspace and collection visibility.")
-                    _write_log("collection_uid_resolution", "not_found_no_bootstrap", {"source": "env", "reason": reason})
-                    sys.exit(1)
-
-                # Bootstrap allowed: create a new collection and persist it so
-                # subsequent runs use the persisted UID instead of the stale secret.
+                # No persisted UID — create a new collection to recover from stale secret
                 from postman_api import create_empty_collection
-                print("🔹 POSTMAN_COLLECTION_UID could not be resolved; POSTMAN_ALLOW_BOOTSTRAP_CREATE enabled — creating a new collection now (one-time)")
+                print("🔹 Provided POSTMAN_COLLECTION_UID is stale/not found; creating a new collection and updating generated/state.json")
                 try:
                     created_uid = create_empty_collection(api_key, workspace_id, "Payments – Refund API")
-                    _write_log("create_empty_collection", "success", {"created": True})
-                    print("CREATED COLLECTION UID (persisted): [value omitted for secrets]")
+                    _write_log("collection_uid_resolution", "stale_fallback_created", {"note": "created new uid from stale provided", "uid_omitted": True})
                     # Persist the created UID immediately to state.json so subsequent runs reuse it
                     state_obj = {
                         "spec_sha256": spec_sha256,
                         "last_synced_at": datetime.now(timezone.utc).isoformat(),
                         "collection_uid": created_uid,
-                        "collection_uid_source": "created_by_bootstrap",
+                        "collection_uid_source": "created_from_stale_uid_fallback",
                         "environments": prev_state.get("environments", {}) if prev_state else {}
                     }
-                    state_file.write_text(json.dumps(state_obj, indent=2))
-                    _write_log("state_write", "success", {"path": str(state_file)})
+                    try:
+                        state_file.write_text(json.dumps(state_obj, indent=2))
+                        _write_log("state_write", "success", {"path": str(state_file)})
+                    except Exception as e:
+                        _write_log("state_write", "failed", {"error": str(e)})
+                        raise
                     # Update in-memory prev_state and target for this run
                     prev_state = state_obj
                     target_uid = created_uid
-                    collection_uid_source = "created_by_bootstrap"
+                    collection_uid_source = "created_from_stale_uid_fallback"
                 except Exception as e:
                     _write_log("create_empty_collection", "failed", {"error": str(e)})
                     raise
