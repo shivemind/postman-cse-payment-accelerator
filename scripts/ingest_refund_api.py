@@ -190,21 +190,76 @@ def main():
 
     # Determine whether to perform a PATCH-style partial update
     use_patch = os.getenv("POSTMAN_USE_PATCH", "false").lower() in ("1", "true", "yes")
+    do_sync_linked = os.getenv("SYNC_LINKED_COLLECTIONS", "false").lower() in ("1", "true", "yes")
     print("🔹 Upserting collection to Postman")
-    used_patch = False
+
+    # Track patch/put decisions for workflow summary
+    patch_attempted = False
+    patch_succeeded = False
+    put_performed = False
+    patch_reason = None
+
     if use_patch and collection_uid:
-        # When using PATCH, we send only the parts that changed. For simplicity we
-        # send the full collection wrapped as-is; the Postman API may accept PATCH
-        # or will raise; callers can set POSTMAN_USE_PATCH to false if PATCH fails.
+        patch_attempted = True
         try:
             from postman_api import patch_collection
             coll_result = patch_collection(api_key, collection_uid, {"collection": coll_for_write})
-            used_patch = True
+            patch_succeeded = True
+            print("✅ PATCH (metadata-only) succeeded")
+            _write_log("patch_collection", "success", {"uid": collection_uid})
         except Exception as e:
-            print("⚠️ PATCH failed, falling back to upsert PUT/POST:", e)
+            patch_succeeded = False
+            print("⚠️ PATCH failed, will consider PUT upsert:", e)
+            _write_log("patch_collection", "failed", {"error": str(e)})
+
+        # Always try to sync linked collections if requested
+        if do_sync_linked:
+            try:
+                from postman_api import sync_linked_collections
+                linked_results = sync_linked_collections(api_key, workspace_id, coll_for_write)
+                _write_log("sync_linked_collections", "success", {"results": linked_results})
+                print(f"✅ Synced {len(linked_results)} linked collections")
+            except Exception as e:
+                _write_log("sync_linked_collections", "failed", {"error": str(e)})
+                print("⚠️ Failed to sync linked collections:", e)
+
+        # Compute item structure fingerprint and decide whether to PUT (structure change)
+        import json as _j
+        items = coll_for_write.get("item") or coll_for_write.get("items") or []
+        try:
+            item_hash = hashlib.sha256(_j.dumps(items, sort_keys=True).encode("utf-8")).hexdigest()
+        except Exception:
+            item_hash = None
+
+        prev_item_hash = prev_state.get("item_hash") or prev_state.get("item_sha256")
+
+        if not patch_succeeded:
+            # If PATCH failed completely, perform a PUT upsert to ensure collection state
+            print("Item structure change unknown because PATCH failed; performing PUT upsert")
             coll_result = upsert_collection(api_key, workspace_id, coll_for_write, collection_uid)
+            put_performed = True
+            patch_reason = "patch_failed"
+        else:
+            if item_hash and prev_item_hash != item_hash:
+                print("Item structure changed, performing PUT upsert")
+                _write_log("item_hash_check", "changed", {"prev": prev_item_hash, "now": item_hash})
+                coll_result = upsert_collection(api_key, workspace_id, coll_for_write, collection_uid)
+                put_performed = True
+                patch_reason = "structure_changed"
+            else:
+                print("PATCH-only update applied; structure unchanged")
+                _write_log("item_hash_check", "unchanged", {"item_hash": item_hash})
+                coll_result = collection_uid
+                put_performed = False
+                patch_reason = "structure_unchanged"
+
     else:
+        # No PATCH requested or no existing UID — full upsert
         coll_result = upsert_collection(api_key, workspace_id, coll_for_write, collection_uid)
+        if use_patch and not collection_uid:
+            patch_attempted = False
+            patch_succeeded = False
+            patch_reason = "no_existing_uid"
     # coll_result may be a UID string or a richer object; normalize to uid
     collection_uid_result = None
     if isinstance(coll_result, str):
@@ -217,8 +272,21 @@ def main():
     print(f"✅ Collection upsert result: {collection_uid_result}")
     _write_log("upsert_collection", "success", {"uid": collection_uid_result})
 
-    if used_patch:
-        _write_log("patch_collection", "success", {"uid": collection_uid_result})
+    # Record PATCH/PUT summary if we attempted a patch
+    try:
+        if patch_attempted:
+            summary = {
+                "patch_attempted": bool(patch_attempted),
+                "patch_succeeded": bool(patch_succeeded),
+                "put_performed": bool(put_performed),
+                "patch_reason": patch_reason,
+                "collection_uid": collection_uid_result,
+            }
+            _write_log("patch_summary", "info", summary)
+            print(f"🔹 PATCH summary: attempted={patch_attempted} succeeded={patch_succeeded} put_performed={put_performed} reason={patch_reason}")
+    except NameError:
+        # Older runs may not have patch flags; ignore
+        pass
 
     # Sync any linked collections declared inside the collection payload
     try:
@@ -291,6 +359,13 @@ def main():
         try:
             if 'spec_id' in locals() and spec_id:
                 state_obj["spec_id"] = spec_id
+        except Exception:
+            pass
+
+        # include item_hash if computed during a PATCH decision
+        try:
+            if 'item_hash' in locals() and item_hash:
+                state_obj["item_hash"] = item_hash
         except Exception:
             pass
 

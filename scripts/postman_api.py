@@ -168,12 +168,53 @@ def patch_collection(api_key: str, collection_uid: str, partial_body: dict):
     """
     url = f"{BASE_URL}/collections/{collection_uid}"
     headers_ = headers(api_key)
-    resp = requests.patch(url, headers=headers_, json=partial_body, timeout=30)
-    try:
-        resp.raise_for_status()
-    except requests.exceptions.HTTPError:
-        raise RuntimeError(f"Postman patch_collection failed: {resp.status_code} - {resp.text}")
-    return resp.json()
+
+    # Accept either {'collection': {...}} or {...}
+    coll = None
+    if isinstance(partial_body, dict) and "collection" in partial_body:
+        coll = partial_body.get("collection")
+    elif isinstance(partial_body, dict):
+        coll = partial_body
+    else:
+        raise RuntimeError("patch_collection expects a dict or {'collection': {...}} payload")
+
+    # Build candidate payloads that omit 'item' (structures) since PATCH must not include them
+    def make_payload(include_event=True, include_variable=True):
+        payload_coll = {}
+        if coll.get("info"):
+            # Only include name/description/schema fields from info
+            info = coll.get("info")
+            payload_coll["info"] = {
+                k: v for k, v in info.items() if k in ("name", "description", "schema")
+            }
+        if include_event and coll.get("event"):
+            payload_coll["event"] = coll.get("event")
+        if include_variable and coll.get("variable"):
+            payload_coll["variable"] = coll.get("variable")
+        return {"collection": payload_coll}
+
+    attempts = [ (True, True), (False, True), (False, False) ]
+    last_exc = None
+    for include_event, include_variable in attempts:
+        payload = make_payload(include_event=include_event, include_variable=include_variable)
+        try:
+            resp = requests.request("PATCH", url, headers=headers_, json=payload, timeout=30)
+            if resp.status_code >= 400:
+                # If bad request, try next reduced payload
+                last_exc = RuntimeError(f"Postman patch_collection failed: {resp.status_code} - {resp.text}")
+                # If the response indicates invalid parameter for 'event', try smaller payload
+                continue
+            data = resp.json()
+            # normalize return similar to upsert_collection
+            return data.get("collection", {}).get("uid") or data.get("collection", {}).get("id") or data.get("uid") or data
+        except requests.exceptions.RequestException as e:
+            last_exc = e
+            continue
+
+    # If we reach here, all attempts failed
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Postman patch_collection failed: unknown error")
 
 
 def get_collection(api_key: str, collection_uid: str):
