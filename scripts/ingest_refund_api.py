@@ -193,16 +193,38 @@ def main():
     # If the import/generation returned a collection with no `item` entries,
     # fall back to a local converter to ensure the collection contains requests.
     from postman_api import openapi_to_collection
-    coll_for_write = collection
-    if not isinstance(collection, dict) or (isinstance(collection, dict) and not (collection.get("item") or collection.get("items"))):
-        print("⚠️ Imported collection contains no requests; generating items locally from OpenAPI spec")
-        _write_log("local_conversion", "starting", {"reason": "import_missing_items"})
+
+    # Ensure we always have a valid collection dict to modify and write.
+    # If we skipped the Import API because a target UID was provided/resolved,
+    # generate the collection locally from the OpenAPI spec so we can inject
+    # scripts and upsert into the existing collection.
+    if not collection:
+        _write_log("local_conversion", "starting", {"reason": "no_import_or_skipped", "target_uid_provided": bool(target_uid)})
         try:
             coll_for_write = openapi_to_collection(spec_content, spec_name)
             _write_log("local_conversion", "success", {"generated_items": len(coll_for_write.get("item") or [])})
+            print("✅ Generated collection from OpenAPI locally (no import performed).")
         except Exception as e:
             _write_log("local_conversion", "failed", {"error": str(e)})
-            print("Failed to convert OpenAPI to collection locally:", e)
+            raise RuntimeError(f"Failed to generate collection locally when import skipped: {e}")
+    else:
+        coll_for_write = collection
+        # If an imported collection exists but lacks items, generate items locally
+        if not isinstance(collection, dict) or not (collection.get("item") or collection.get("items")):
+            print("⚠️ Imported collection contains no requests; generating items locally from OpenAPI spec")
+            _write_log("local_conversion", "starting", {"reason": "import_missing_items"})
+            try:
+                coll_for_write = openapi_to_collection(spec_content, spec_name)
+                _write_log("local_conversion", "success", {"generated_items": len(coll_for_write.get("item") or [])})
+            except Exception as e:
+                _write_log("local_conversion", "failed", {"error": str(e)})
+                print("Failed to convert OpenAPI to collection locally:", e)
+
+    # Validate the generated/selected collection structure before proceeding.
+    if not coll_for_write or not isinstance(coll_for_write, dict):
+        raise RuntimeError("Collection generation failed: collection is empty or not a dict. Aborting to avoid corrupting Postman state.")
+    if not (coll_for_write.get("item") or coll_for_write.get("items")) or not coll_for_write.get("info"):
+        raise RuntimeError("Generated collection missing required fields ('info' or 'item'). Ensure OpenAPI spec contains operations or allow Import API to run.")
 
     print("🔹 Injecting JWT pre-request script")
     jwt_code = JWT_SCRIPT.read_text().splitlines()
