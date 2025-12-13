@@ -2,6 +2,11 @@ name: 01 - Ingest and Upsert (Good)
 
 on:
   workflow_dispatch:
+    inputs:
+      collection_uid:
+        description: 'Optional collection UID to target (overrides secret).'
+        required: false
+        default: ''
   push:
     branches: [ main ]
   pull_request:
@@ -28,6 +33,8 @@ jobs:
         env:
           POSTMAN_API_KEY: ${{ secrets.POSTMAN_API_KEY }}
           POSTMAN_WORKSPACE_ID: ${{ secrets.POSTMAN_WORKSPACE_ID }}
+          # Allow either an explicit workflow input or the repository secret to provide the authoritative collection UID
+          POSTMAN_COLLECTION_UID: ${{ inputs.collection_uid || secrets.POSTMAN_COLLECTION_UID }}
           DEV_BASE_URL: ${{ secrets.DEV_BASE_URL }}
           QA_BASE_URL: ${{ secrets.QA_BASE_URL }}
           UAT_BASE_URL: ${{ secrets.UAT_BASE_URL }}
@@ -38,6 +45,45 @@ jobs:
         run: |
           set -e
           python scripts/ingest_refund_api.py || (echo 'Ingestion failed' && exit 1)
+
+        - name: Publish collection UID to job summary
+        if: always()
+        run: |
+          python - <<'PY'
+    import json, os, sys
+    summary_path = os.environ.get('GITHUB_STEP_SUMMARY')
+    uid = None
+    state_path = 'generated/state.json'
+    ids_path = 'generated/postman_ids.json'
+    try:
+      if os.path.exists(state_path):
+        with open(state_path,'r',encoding='utf-8') as fh:
+          s = json.load(fh)
+          uid = s.get('collection_uid') or s.get('collection')
+      if not uid and os.path.exists(ids_path):
+        with open(ids_path,'r',encoding='utf-8') as fh:
+          j = json.load(fh)
+          uid = j.get('collection_uid')
+    except Exception:
+      uid = None
+
+    if uid:
+      line = f"Resolved Postman collection UID: {uid}\n"
+      print(line)
+      if summary_path:
+        with open(summary_path,'a',encoding='utf-8') as s:
+          s.write('### Postman collection\n')
+          s.write(f'- **Collection UID**: `{uid}`\n')
+    else:
+      # No UID found; instruct adding secret for idempotency
+      note = 'No collection UID was resolved. Add `POSTMAN_COLLECTION_UID` (repo secret) to make future runs idempotent.'
+      print(note)
+      if summary_path:
+        with open(summary_path,'a',encoding='utf-8') as s:
+          s.write('### Postman collection\n')
+          s.write('- **Collection UID**: _not found_\n')
+          s.write(f'- {note}\n')
+    PY
 
       - name: Upload generated collection
         if: always()

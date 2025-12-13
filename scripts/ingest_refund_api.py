@@ -185,8 +185,35 @@ def main():
         )
 
     env_collection_uid = os.getenv("POSTMAN_COLLECTION_UID")
+    # UID selection order:
+    # 1. POSTMAN_COLLECTION_UID env (set from secrets or workflow input)
+    # 2. previous run state.json stored collection_uid
+    # 3. UID returned by the import/spec hub call
     returned_uid = _extract_uid(collection)
-    collection_uid = env_collection_uid or returned_uid
+    state_uid = prev_state.get("collection_uid")
+    collection_uid = None
+    uid_source = None
+
+    if env_collection_uid:
+        collection_uid = env_collection_uid
+        uid_source = "secrets_or_input"
+        print("🔐 Using collection UID from secrets/input (POSTMAN_COLLECTION_UID)")
+        _write_log("collection_uid_source", "secrets", {"uid": collection_uid})
+    elif state_uid:
+        collection_uid = state_uid
+        uid_source = "state.json"
+        print("📁 Using collection UID from generated/state.json")
+        _write_log("collection_uid_source", "state", {"uid": collection_uid})
+    elif returned_uid:
+        collection_uid = returned_uid
+        uid_source = "import_returned"
+        print("🔎 Using collection UID returned by import/spec hub")
+        _write_log("collection_uid_source", "returned", {"uid": collection_uid})
+    else:
+        collection_uid = None
+        uid_source = "none"
+        print("⚪ No UID found; creating new collection.")
+        _write_log("collection_uid_source", "none", {"note": "no uid available; will create new collection"})
 
     # Determine whether to perform a PATCH-style partial update
     use_patch = os.getenv("POSTMAN_USE_PATCH", "false").lower() in ("1", "true", "yes")
