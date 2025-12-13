@@ -6,6 +6,9 @@ on:
       confirm:
         description: 'Type RESET to confirm demo reset'
         required: true
+      collection_uid:
+        description: 'Postman Collection UID to delete'
+        required: true
 
 permissions:
   contents: read
@@ -99,6 +102,7 @@ jobs:
         env:
           POSTMAN_API_KEY: ${{ secrets.POSTMAN_API_KEY }}
           POSTMAN_WORKSPACE_ID: ${{ secrets.POSTMAN_WORKSPACE_ID }}
+          POSTMAN_COLLECTION_UID: ${{ inputs.collection_uid }}
         shell: bash
         run: |
           set -euo pipefail
