@@ -156,7 +156,10 @@ def upsert_collection(api_key: str, workspace_id: str, coll_payload: dict, colle
 
     # Newer responses use `uid`, older may use `collection.uid` - be flexible
     data = resp.json()
-    return data.get("collection", {}).get("uid") or data.get("collection", {}).get("id") or data.get("uid") or data
+    uid = data.get("collection", {}).get("uid") or data.get("collection", {}).get("id") or data.get("uid")
+    if uid:
+        return str(uid)
+    return data
 
 
 def patch_collection(api_key: str, collection_uid: str, partial_body: dict):
@@ -215,6 +218,16 @@ def patch_collection(api_key: str, collection_uid: str, partial_body: dict):
     if last_exc:
         raise last_exc
     raise RuntimeError("Postman patch_collection failed: unknown error")
+
+
+def patch_collection_metadata_only(api_key: str, collection_uid: str, collection: dict):
+    """Attempt a metadata-only PATCH that never includes `item`.
+
+    This wraps existing `patch_collection` behavior which already builds
+    reduced payloads and omits `item`. On success returns the collection UID.
+    On failure it will raise so callers can fall back to PUT.
+    """
+    return patch_collection(api_key, collection_uid, {"collection": collection})
 
 
 def get_collection(api_key: str, collection_uid: str):

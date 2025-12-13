@@ -29,17 +29,29 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
+        shell: bash
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Ensure generated directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p generated generated/environments
+
       - name: Prepare effective POSTMAN_COLLECTION_UID
         id: prep_uid
+        shell: bash
         # Use inputs first (manual override), then repo secret if present; write result to GITHUB_ENV and GITHUB_OUTPUT
         env:
           INPUT_COLLECTION_UID: ${{ inputs.collection_uid }}
           SECRET_COLLECTION_UID: ${{ secrets.POSTMAN_COLLECTION_UID }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_FORCE: ${{ inputs.force }}
         run: |
+          set -euo pipefail
           if [ -n "$INPUT_COLLECTION_UID" ]; then
             echo "POSTMAN_COLLECTION_UID=$INPUT_COLLECTION_UID" >> $GITHUB_ENV
             echo "collection_uid=$INPUT_COLLECTION_UID" >> $GITHUB_OUTPUT
@@ -47,12 +59,21 @@ jobs:
           elif [ -n "$SECRET_COLLECTION_UID" ]; then
             echo "POSTMAN_COLLECTION_UID=$SECRET_COLLECTION_UID" >> $GITHUB_ENV
             echo "collection_uid=$SECRET_COLLECTION_UID" >> $GITHUB_OUTPUT
-            echo "Using repository secret POSTMAN_COLLECTION_UID"
+            echo "Using secret POSTMAN_COLLECTION_UID"
           else
-            # leave empty so the script can create a new collection on first run
             echo "POSTMAN_COLLECTION_UID=" >> $GITHUB_ENV
             echo "collection_uid=" >> $GITHUB_OUTPUT
-            echo "No collection UID provided; first-run may create a new collection"
+            echo "No collection UID provided; will create a new collection"
+          fi
+
+          # Populate POSTMAN_FORCE; only honor input when this is a manual workflow_dispatch
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # INPUT_FORCE may be 'true' or 'false'
+            echo "POSTMAN_FORCE=$INPUT_FORCE" >> $GITHUB_ENV
+            echo "POSTMAN_FORCE=$INPUT_FORCE" >> $GITHUB_OUTPUT || true
+          else
+            echo "POSTMAN_FORCE=false" >> $GITHUB_ENV
+            echo "POSTMAN_FORCE=false" >> $GITHUB_OUTPUT || true
           fi
 
       - name: Run ingestion script
@@ -61,8 +82,8 @@ jobs:
           POSTMAN_WORKSPACE_ID: ${{ secrets.POSTMAN_WORKSPACE_ID }}
           # POSTMAN_COLLECTION_UID is passed from the prepare step outputs to avoid premature evaluation
           POSTMAN_COLLECTION_UID: ${{ steps.prep_uid.outputs.collection_uid }}
-          # Allow forcing via workflow input only for manual dispatches; default to 'false' otherwise
-          POSTMAN_FORCE: ${{ (github.event_name == 'workflow_dispatch' && inputs.force) || 'false' }}
+          # POSTMAN_FORCE value is prepared by the prep_uid step
+          POSTMAN_FORCE: ${{ steps.prep_uid.outputs.POSTMAN_FORCE }}
           DEV_BASE_URL: ${{ secrets.DEV_BASE_URL }}
           QA_BASE_URL: ${{ secrets.QA_BASE_URL }}
           UAT_BASE_URL: ${{ secrets.UAT_BASE_URL }}
@@ -70,8 +91,9 @@ jobs:
           JWT_ISSUER: ${{ secrets.JWT_ISSUER }}
           JWT_AUDIENCE: ${{ secrets.JWT_AUDIENCE }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
           python scripts/ingest_refund_api.py || (echo 'Ingestion failed' && exit 1)
 
       - name: Publish collection + environment UIDs to job summary

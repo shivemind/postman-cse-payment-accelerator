@@ -229,8 +229,9 @@ def main():
     if use_patch and collection_uid:
         patch_attempted = True
         try:
-            from postman_api import patch_collection
-            coll_result = patch_collection(api_key, collection_uid, {"collection": coll_for_write})
+            from postman_api import patch_collection_metadata_only
+            # Attempt a metadata-only PATCH (never sends `item`). Returns UID on success.
+            coll_result = patch_collection_metadata_only(api_key, collection_uid, coll_for_write)
             patch_succeeded = True
             print("✅ PATCH (metadata-only) succeeded")
             _write_log("patch_collection", "success", {"uid": collection_uid})
