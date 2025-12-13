@@ -1,0 +1,47 @@
+name: 01 - Ingest and Upsert (Good)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run ingestion script
+        env:
+          POSTMAN_API_KEY: ${{ secrets.POSTMAN_API_KEY }}
+          POSTMAN_WORKSPACE_ID: ${{ secrets.POSTMAN_WORKSPACE_ID }}
+          DEV_BASE_URL: ${{ secrets.DEV_BASE_URL }}
+          QA_BASE_URL: ${{ secrets.QA_BASE_URL }}
+          UAT_BASE_URL: ${{ secrets.UAT_BASE_URL }}
+          PROD_BASE_URL: ${{ secrets.PROD_BASE_URL }}
+          JWT_ISSUER: ${{ secrets.JWT_ISSUER }}
+          JWT_AUDIENCE: ${{ secrets.JWT_AUDIENCE }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        run: |
+          set -e
+          python scripts/ingest_refund_api.py || (echo 'Ingestion failed' && exit 1)
+
+      - name: Upload generated collection
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: refund-collection
+          path: generated/refund.collection.json

@@ -212,6 +212,30 @@ def get_environment_by_name(api_key: str, workspace_id: str, name: str):
     return None
 
 
+def list_collections(api_key: str, workspace_id: str):
+    """List collections in a workspace. Returns list of collection dicts."""
+    url = f"{BASE_URL}/collections?workspace={workspace_id}"
+    resp = requests.get(url, headers=headers(api_key), timeout=30)
+    try:
+        resp.raise_for_status()
+    except requests.exceptions.HTTPError:
+        raise RuntimeError(f"Postman list_collections failed: {resp.status_code} - {resp.text}")
+    data = resp.json()
+    return data.get("collections") or []
+
+
+def get_collection_by_name(api_key: str, workspace_id: str, name: str):
+    """Return the UID of a collection in the workspace by its name, or None."""
+    if not name:
+        return None
+    cols = list_collections(api_key, workspace_id)
+    for c in cols:
+        coll = c.get("collection") or c
+        if coll.get("info", {}).get("name") == name or coll.get("name") == name:
+            return coll.get("uid") or coll.get("id")
+    return None
+
+
 def sync_linked_collections(api_key: str, workspace_id: str, collection: dict):
     """Sync any linked collections declared in the collection payload.
 

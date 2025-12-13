@@ -1,0 +1,66 @@
+name: 03 - AWS Spec Retrieval + Sync (Exceptional)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ingest_from_s3:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          role-session-name: actions
+
+      - name: Download spec from S3
+        env:
+          OPENAPI_S3_URI: ${{ secrets.OPENAPI_S3_URI }}
+        run: |
+          aws s3 cp "$OPENAPI_S3_URI" specs/payment-refund-api-openapi.yaml
+          if [ ! -s specs/payment-refund-api-openapi.yaml ]; then echo 'Downloaded spec is empty' && exit 1; fi
+          sha256sum specs/payment-refund-api-openapi.yaml | awk '{print $1}' > specs/spec.sha256
+          echo "Spec SHA256: $(cat specs/spec.sha256)"
+
+      - name: Set up Python (with cache)
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run ingestion script
+        env:
+          POSTMAN_API_KEY: ${{ secrets.POSTMAN_API_KEY }}
+          POSTMAN_WORKSPACE_ID: ${{ secrets.POSTMAN_WORKSPACE_ID }}
+          DEV_BASE_URL: ${{ secrets.DEV_BASE_URL }}
+          QA_BASE_URL: ${{ secrets.QA_BASE_URL }}
+          UAT_BASE_URL: ${{ secrets.UAT_BASE_URL }}
+          PROD_BASE_URL: ${{ secrets.PROD_BASE_URL }}
+          JWT_ISSUER: ${{ secrets.JWT_ISSUER }}
+          JWT_AUDIENCE: ${{ secrets.JWT_AUDIENCE }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        run: |
+          python scripts/ingest_refund_api.py || (echo 'Ingestion failed' && exit 1)
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "### AWS Ingestion Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Spec S3 URI: ${{ secrets.OPENAPI_S3_URI }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Spec SHA256: $(cat specs/spec.sha256)" >> $GITHUB_STEP_SUMMARY
+          echo "- Collection UID: $(jq -r .collection_uid generated/postman_ids.json // empty)" >> $GITHUB_STEP_SUMMARY
+          jq -r '.environments | to_entries[] | "- \(.key): \(.value)"' generated/postman_ids.json >> $GITHUB_STEP_SUMMARY || true

@@ -1,0 +1,48 @@
+name: 02 - Patch and Linked Sync (Great)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ingest_patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run ingestion script (PATCH + linked)
+        env:
+          POSTMAN_API_KEY: ${{ secrets.POSTMAN_API_KEY }}
+          POSTMAN_WORKSPACE_ID: ${{ secrets.POSTMAN_WORKSPACE_ID }}
+          POSTMAN_USE_PATCH: 'true'
+          SYNC_LINKED_COLLECTIONS: 'true'
+          DEV_BASE_URL: ${{ secrets.DEV_BASE_URL }}
+          QA_BASE_URL: ${{ secrets.QA_BASE_URL }}
+          UAT_BASE_URL: ${{ secrets.UAT_BASE_URL }}
+          PROD_BASE_URL: ${{ secrets.PROD_BASE_URL }}
+          JWT_ISSUER: ${{ secrets.JWT_ISSUER }}
+          JWT_AUDIENCE: ${{ secrets.JWT_AUDIENCE }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        run: |
+          echo 'PATCH enabled'
+          python scripts/ingest_refund_api.py || (echo 'Ingestion failed' && exit 1)
+
+      - name: Create job summary
+        if: always()
+        run: |
+          echo "### Ingestion Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Collection UID: $(jq -r .collection_uid generated/postman_ids.json // empty)" >> $GITHUB_STEP_SUMMARY
+          echo "- Env UIDs:" >> $GITHUB_STEP_SUMMARY
+          jq -r '.environments | to_entries[] | "  - \(.key): \(.value)"' generated/postman_ids.json >> $GITHUB_STEP_SUMMARY || true
+          echo "- PATCH used: true" >> $GITHUB_STEP_SUMMARY
+          echo "- Linked collections synced: check logs for details" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,36 @@
+name: 04 - Reset Demo (Safe reset)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type RESET to confirm demo reset'
+        required: true
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate confirmation
+        run: |
+          if [[ "${{ github.event.inputs.confirm }}" != "RESET" ]]; then echo "Confirmation did not match 'RESET' - aborting" && exit 1; fi
+
+      - name: Run reset script
+        env:
+          POSTMAN_API_KEY: ${{ secrets.POSTMAN_API_KEY }}
+          POSTMAN_WORKSPACE_ID: ${{ secrets.POSTMAN_WORKSPACE_ID }}
+        run: |
+          python scripts/reset_demo.py
