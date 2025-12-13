@@ -106,36 +106,48 @@ def main():
     # Choose flow: Spec Hub (create_spec -> generate_collection) or Import API.
     # Resolve target collection UID (support numeric-prefixed UID or plain UUID id)
     from postman_api import resolve_collection_uid, collection_exists, delete_collection
+    import re
+
+    def is_numeric_prefixed_uid(uid: str) -> bool:
+        return bool(re.match(r"^\d+-[0-9a-fA-F\-]{36}$", uid))
 
     provided_raw = os.getenv("POSTMAN_COLLECTION_UID", "")
     provided = provided_raw.strip() if provided_raw else None
     target_uid = None
     collection_uid_source = None
     if provided:
-        try:
-            resolved = resolve_collection_uid(api_key, workspace_id, provided)
-            if resolved:
-                # verify the resolved uid actually exists; if not, treat as not found (do not fail)
-                try:
-                    if collection_exists(api_key, resolved):
-                        target_uid = resolved
-                        collection_uid_source = "env_secret_resolved_uid"
-                        _write_log("collection_uid_resolution", "resolved", {"source": "env", "note": "resolved_to_uid"})
-                    else:
-                        collection_uid_source = "env_secret_not_found"
-                        _write_log("collection_uid_resolution", "not_found", {"source": "env"})
-                except Exception as e:
-                    # If existence check fails, treat as not found but log
-                    collection_uid_source = "env_secret_check_error"
-                    _write_log("collection_uid_resolution", "error", {"error": str(e)})
-                    target_uid = None
-            else:
-                # Provided value did not match expected formats or could not be resolved
-                collection_uid_source = "env_secret_invalid"
-                _write_log("collection_uid_resolution", "invalid", {"source": "env"})
-        except Exception as e:
-            collection_uid_source = "env_secret_resolution_error"
-            _write_log("collection_uid_resolution", "error", {"error": str(e)})
+        # If the provided UID already matches the numeric-prefixed Postman UID
+        # format, treat it as authoritative and do NOT attempt workspace lookups
+        # or existence checks which can produce false negatives in CI.
+        if is_numeric_prefixed_uid(provided):
+            target_uid = provided
+            collection_uid_source = "env_secret_numeric_prefixed"
+            _write_log("collection_uid_resolution", "accepted", {"source": "env", "note": "numeric_prefixed_uid_used"})
+        else:
+            try:
+                resolved = resolve_collection_uid(api_key, workspace_id, provided)
+                if resolved:
+                    # verify the resolved uid actually exists; if not, treat as not found (do not fail)
+                    try:
+                        if collection_exists(api_key, resolved):
+                            target_uid = resolved
+                            collection_uid_source = "env_secret_resolved_uid"
+                            _write_log("collection_uid_resolution", "resolved", {"source": "env", "note": "resolved_to_uid"})
+                        else:
+                            collection_uid_source = "env_secret_not_found"
+                            _write_log("collection_uid_resolution", "not_found", {"source": "env"})
+                    except Exception as e:
+                        # If existence check fails, treat as not found but log
+                        collection_uid_source = "env_secret_check_error"
+                        _write_log("collection_uid_resolution", "error", {"error": str(e)})
+                        target_uid = None
+                else:
+                    # Provided value did not match expected formats or could not be resolved
+                    collection_uid_source = "env_secret_invalid"
+                    _write_log("collection_uid_resolution", "invalid", {"source": "env"})
+            except Exception as e:
+                collection_uid_source = "env_secret_resolution_error"
+                _write_log("collection_uid_resolution", "error", {"error": str(e)})
 
     use_spec_hub = os.getenv("USE_SPEC_HUB", "false").lower() in ("1", "true", "yes")
     collection = None
@@ -289,6 +301,12 @@ def main():
         uid_source = uid_source or "none"
         print("No collection UID found; will create a new collection")
         _write_log("collection_uid_source", "none", {"note": "no uid available; will create new collection"})
+
+    # If the user provided a numeric-prefixed POSTMAN_COLLECTION_UID, it must be authoritative.
+    if provided and is_numeric_prefixed_uid(provided):
+        if collection_uid != provided:
+            # Fail fast: do NOT fallback to POST when a numeric-prefixed UID was explicitly provided
+            raise RuntimeError("POSTMAN_COLLECTION_UID is numeric-prefixed and must be used as the target UID; aborting to avoid creating a duplicate collection.")
 
     # Determine whether to perform a PATCH-style partial update
     use_patch = os.getenv("POSTMAN_USE_PATCH", "false").lower() in ("1", "true", "yes")
