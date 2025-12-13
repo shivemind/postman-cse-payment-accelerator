@@ -228,7 +228,10 @@ def main():
 
     print("🔹 Injecting JWT pre-request script")
     jwt_code = JWT_SCRIPT.read_text().splitlines()
-    collection.setdefault("event", []).append({
+    # Defensive: ensure coll_for_write is a dict before mutating it
+    if not isinstance(coll_for_write, dict):
+        raise RuntimeError("Internal error: collection to write is not a dict; aborting to avoid corrupting Postman state.")
+    coll_for_write.setdefault("event", []).append({
         "listen": "prerequest",
         "script": {
             "type": "text/javascript",
