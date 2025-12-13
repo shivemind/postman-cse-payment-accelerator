@@ -77,8 +77,14 @@ def main():
             delete_collection(api_key, collection_uid)
             print("Deleted collection")
         except Exception as e:
-            print("Failed to delete collection:", e)
-            errors.append(str(e))
+            msg = str(e)
+            low = msg.lower()
+            # Treat HTTP 404 with instanceNotFoundError as already-deleted (non-fatal)
+            if "404" in msg and "instancenotfounderror" in low:
+                print("Already deleted")
+            else:
+                print("Failed to delete collection:", e)
+                errors.append(str(e))
     else:
         print("No collection UID found; skipping collection delete")
 
@@ -90,8 +96,13 @@ def main():
             delete_environment(api_key, uid)
             print("Deleted environment")
         except Exception as e:
-            print(f"Failed to delete environment {k}:", e)
-            errors.append(str(e))
+            msg = str(e)
+            low = msg.lower()
+            if "404" in msg and "instancenotfounderror" in low:
+                print("Already deleted")
+            else:
+                print(f"Failed to delete environment {k}:", e)
+                errors.append(str(e))
 
     if errors:
         print("Completed with errors:")
