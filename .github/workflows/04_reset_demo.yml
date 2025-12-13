@@ -7,6 +7,10 @@ on:
         description: 'Type RESET to confirm demo reset'
         required: true
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   reset:
     runs-on: ubuntu-latest
@@ -30,17 +34,66 @@ jobs:
         run: |
           if [[ "${{ github.event.inputs.confirm }}" != "RESET" ]]; then echo "Confirmation did not match 'RESET' - aborting" && exit 1; fi
 
-      # Download the latest postman_state artifact produced by the ingest job so
-      # the reset job can find the most-recent collection UID. The runner
-      # filesystem is ephemeral so we persist state via artifacts in the ingest
-      # workflow. Continue if no artifact is found so older setups without the
-      # artifact still work.
+      # Find & download the latest postman_state artifact produced by the ingest job
+      # We query the GitHub Actions API for the most recent successful `ingest.yml` run
+      # on `main` and then download that run's artifact. Runner filesystems are
+      # ephemeral so artifacts are used to persist state between workflow runs.
+      - name: Find latest ingest run id
+        id: find_ingest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python - << 'PY'
+          import os, sys, json, urllib.request
+          repo = os.environ['GITHUB_REPOSITORY']
+          token = os.environ['GITHUB_TOKEN']
+          url = f"https://api.github.com/repos/{repo}/actions/workflows/ingest.yml/runs?branch=main&per_page=50"
+          req = urllib.request.Request(url, headers={
+              'Authorization': f'token {token}',
+              'Accept': 'application/vnd.github+json'
+          })
+          try:
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  data = json.load(resp)
+          except Exception:
+              out = os.environ.get('GITHUB_OUTPUT')
+              if out:
+                  with open(out, 'a') as fh:
+                      fh.write('run_id=\n')
+              print('Could not query workflow runs; continuing without run id')
+              sys.exit(0)
+          for run in data.get('workflow_runs', []):
+              if run.get('conclusion') == 'success':
+                  rid = run.get('id')
+                  out = os.environ.get('GITHUB_OUTPUT')
+                  if out:
+                      with open(out, 'a') as fh:
+                          fh.write(f'run_id={rid}\n')
+                  print(f'Found ingest run id: {rid}')
+                  sys.exit(0)
+          out = os.environ.get('GITHUB_OUTPUT')
+          if out:
+              with open(out, 'a') as fh:
+                  fh.write('run_id=\n')
+          print('No successful ingest run found; continuing without run id')
+          PY
+
       - name: Download postman_state artifact
         uses: actions/download-artifact@v4
         with:
           name: postman_state
           path: generated
+          run-id: ${{ steps.find_ingest.outputs.run_id }}
+          repository: ${{ github.repository }}
         continue-on-error: true
+
+      - name: Show downloaded artifact files
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Generated dir contents:'
+          ls -la generated || true
 
       - name: Run reset script
         env:
