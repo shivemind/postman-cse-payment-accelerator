@@ -14,6 +14,14 @@ jobs:
     env:
       POSTMAN_API_KEY: ${{ secrets.POSTMAN_API_KEY }}
       POSTMAN_WORKSPACE_ID: ${{ secrets.POSTMAN_WORKSPACE_ID }}
+      POSTMAN_COLLECTION_UID: ${{ secrets.POSTMAN_COLLECTION_UID }}
+      DEV_BASE_URL: ${{ secrets.DEV_BASE_URL }}
+      QA_BASE_URL: ${{ secrets.QA_BASE_URL }}
+      UAT_BASE_URL: ${{ secrets.UAT_BASE_URL }}
+      PROD_BASE_URL: ${{ secrets.PROD_BASE_URL }}
+      JWT_ISSUER: ${{ secrets.JWT_ISSUER }}
+      JWT_AUDIENCE: ${{ secrets.JWT_AUDIENCE }}
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,6 +37,35 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Pre-flight checks and diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Workspace: $(pwd)"
+          echo "Files:"
+          ls -la || true
+          echo "Scripts:"
+          ls -la scripts/ || true
+          # Ensure generated dirs exist
+          mkdir -p generated generated/environments
+          # Validate required env vars are present (do not print secret values)
+          missing=false
+          for v in POSTMAN_API_KEY POSTMAN_WORKSPACE_ID DEV_BASE_URL QA_BASE_URL UAT_BASE_URL PROD_BASE_URL JWT_ISSUER JWT_AUDIENCE JWT_SECRET; do
+            if [ -z "${!v:-}" ]; then
+              echo "Missing env var: $v"
+              missing=true
+            fi
+          done
+          if [ "$missing" = true ]; then
+            echo "One or more required env vars are missing; aborting."
+            exit 1
+          fi
+          if [ -n "${POSTMAN_COLLECTION_UID:-}" ]; then
+            echo "POSTMAN_COLLECTION_UID is set (will target existing collection)"
+          else
+            echo "POSTMAN_COLLECTION_UID is not set (first run will create a new collection)"
+          fi
 
       - name: Run ingestion
         shell: bash
