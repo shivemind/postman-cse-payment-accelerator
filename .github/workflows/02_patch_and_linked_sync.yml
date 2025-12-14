@@ -13,7 +13,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Install dependencies
         shell: bash
@@ -32,8 +32,20 @@ jobs:
         env:
           POSTMAN_API_KEY: ${{ secrets.POSTMAN_API_KEY }}
           POSTMAN_WORKSPACE_ID: ${{ secrets.POSTMAN_WORKSPACE_ID }}
-          POSTMAN_USE_PATCH: 'true'
-          SYNC_LINKED_COLLECTIONS: 'true'
+
+          # ✅ REQUIRED: tell the script which primary collection to update
+          POSTMAN_COLLECTION_UID: ${{ secrets.POSTMAN_COLLECTION_UID }}
+
+          # ✅ PATCH + linked behavior flags
+          POSTMAN_USE_PATCH: "true"
+          SYNC_LINKED_COLLECTIONS: "true"
+
+          # ✅ REQUIRED for linked sync: comma-separated list of existing linked UIDs
+          POSTMAN_LINKED_COLLECTION_UIDS: ${{ secrets.POSTMAN_LINKED_COLLECTION_UIDS }}
+
+          # Keep bootstrap disabled for enterprise-safety (script will fail if UID missing)
+          POSTMAN_ALLOW_BOOTSTRAP_CREATE: "false"
+
           DEV_BASE_URL: ${{ secrets.DEV_BASE_URL }}
           QA_BASE_URL: ${{ secrets.QA_BASE_URL }}
           UAT_BASE_URL: ${{ secrets.UAT_BASE_URL }}
@@ -44,24 +56,47 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo 'PATCH enabled'
+          echo "PATCH enabled"
+
+          # Safe diagnostics (does NOT print secret values)
+          if [ -n "${POSTMAN_COLLECTION_UID:-}" ]; then
+            echo "POSTMAN_COLLECTION_UID is present"
+          else
+            echo "POSTMAN_COLLECTION_UID is MISSING"
+          fi
+
+          if [ -n "${POSTMAN_LINKED_COLLECTION_UIDS:-}" ]; then
+            echo "POSTMAN_LINKED_COLLECTION_UIDS is present"
+          else
+            echo "POSTMAN_LINKED_COLLECTION_UIDS is MISSING"
+          fi
+
           pwd
           ls -la
           ls -la scripts/
-          python scripts/ingest_refund_api.py || (echo 'Ingestion failed' && exit 1)
+          python scripts/ingest_refund_api.py || (echo "Ingestion failed" && exit 1)
 
       - name: Create job summary
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          echo "### Ingestion Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## Ingestion Summary" >> "$GITHUB_STEP_SUMMARY"
+
           if [ -f generated/postman_ids.json ]; then
-            echo "- Collection UID: $(jq -r .collection_uid generated/postman_ids.json)" >> $GITHUB_STEP_SUMMARY
-            echo "- Env UIDs:" >> $GITHUB_STEP_SUMMARY
-            jq -r '.environments | to_entries[] | "  - \(.key): \(.value)"' generated/postman_ids.json >> $GITHUB_STEP_SUMMARY || true
+            # Try a couple shapes defensively
+            COL_UID="$(jq -r '.collection_uid // .collectionUid // .collection.uid // empty' generated/postman_ids.json 2>/dev/null || true)"
+            if [ -n "$COL_UID" ]; then
+              echo "- Collection UID: \`$COL_UID\`" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "- Collection UID: _found file but could not parse UID_" >> "$GITHUB_STEP_SUMMARY"
+            fi
+
+            echo "- Environments:" >> "$GITHUB_STEP_SUMMARY"
+            jq -r '.environments // {} | to_entries[] | "  - \(.key): \(.value)"' generated/postman_ids.json >> "$GITHUB_STEP_SUMMARY" || true
           else
-            echo "- Collection UID: _not found_" >> $GITHUB_STEP_SUMMARY
+            echo "- Collection UID: _not found_" >> "$GITHUB_STEP_SUMMARY"
           fi
-          echo "- PATCH used: true" >> $GITHUB_STEP_SUMMARY
-          echo "- Linked collections synced: check logs for details" >> $GITHUB_STEP_SUMMARY
+
+          echo "- PATCH used: true" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Linked collections synced: see logs (look for \"Synced X linked collections\")" >> "$GITHUB_STEP_SUMMARY"
