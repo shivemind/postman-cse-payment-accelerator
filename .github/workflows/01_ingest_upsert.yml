@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       collection_uid:
-        description: 'Optional collection UID to target (overrides secret).'
+        description: "Optional collection UID to target (overrides secret)."
         required: false
-        default: ''
+        default: ""
       force:
-        description: 'Force regeneration (true/false)'
+        description: "Force regeneration (true/false)"
         required: false
-        default: 'false'
+        default: "false"
   push:
     branches: [ main ]
   pull_request:
@@ -26,7 +26,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Install dependencies
         shell: bash
@@ -52,28 +52,28 @@ jobs:
           INPUT_FORCE: ${{ inputs.force }}
         run: |
           set -euo pipefail
-          if [ -n "$INPUT_COLLECTION_UID" ]; then
-            echo "POSTMAN_COLLECTION_UID=$INPUT_COLLECTION_UID" >> $GITHUB_ENV
-            echo "collection_uid=$INPUT_COLLECTION_UID" >> $GITHUB_OUTPUT
+
+          if [ -n "${INPUT_COLLECTION_UID}" ]; then
+            echo "POSTMAN_COLLECTION_UID=${INPUT_COLLECTION_UID}" >> "$GITHUB_ENV"
+            echo "collection_uid=${INPUT_COLLECTION_UID}" >> "$GITHUB_OUTPUT"
             echo "Using workflow input collection_uid"
-          elif [ -n "$SECRET_COLLECTION_UID" ]; then
-            echo "POSTMAN_COLLECTION_UID=$SECRET_COLLECTION_UID" >> $GITHUB_ENV
-            echo "collection_uid=$SECRET_COLLECTION_UID" >> $GITHUB_OUTPUT
+          elif [ -n "${SECRET_COLLECTION_UID}" ]; then
+            echo "POSTMAN_COLLECTION_UID=${SECRET_COLLECTION_UID}" >> "$GITHUB_ENV"
+            echo "collection_uid=${SECRET_COLLECTION_UID}" >> "$GITHUB_OUTPUT"
             echo "Using secret POSTMAN_COLLECTION_UID"
           else
-            echo "POSTMAN_COLLECTION_UID=" >> $GITHUB_ENV
-            echo "collection_uid=" >> $GITHUB_OUTPUT
+            echo "POSTMAN_COLLECTION_UID=" >> "$GITHUB_ENV"
+            echo "collection_uid=" >> "$GITHUB_OUTPUT"
             echo "No collection UID provided; will create a new collection"
           fi
 
           # Populate POSTMAN_FORCE; only honor input when this is a manual workflow_dispatch
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            # INPUT_FORCE may be 'true' or 'false'
-            echo "POSTMAN_FORCE=$INPUT_FORCE" >> $GITHUB_ENV
-            echo "POSTMAN_FORCE=$INPUT_FORCE" >> $GITHUB_OUTPUT || true
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "POSTMAN_FORCE=${INPUT_FORCE}" >> "$GITHUB_ENV"
+            echo "POSTMAN_FORCE=${INPUT_FORCE}" >> "$GITHUB_OUTPUT"
           else
-            echo "POSTMAN_FORCE=false" >> $GITHUB_ENV
-            echo "POSTMAN_FORCE=false" >> $GITHUB_OUTPUT || true
+            echo "POSTMAN_FORCE=false" >> "$GITHUB_ENV"
+            echo "POSTMAN_FORCE=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Run ingestion script
@@ -97,48 +97,56 @@ jobs:
           pwd
           ls -la
           ls -la scripts/
-          python scripts/ingest_refund_api.py || (echo 'Ingestion failed' && exit 1)
+          python scripts/ingest_refund_api.py
 
       - name: Publish collection + environment UIDs to job summary
         if: always()
         continue-on-error: true
+        shell: bash
         run: |
           python - <<'PY'
-import json, os
-summary = os.environ.get('GITHUB_STEP_SUMMARY')
-state_path = 'generated/state.json'
-ids_path = 'generated/postman_ids.json'
-uid = None
-envs = None
-try:
-    if os.path.exists(state_path):
-        with open(state_path,'r',encoding='utf-8') as fh:
-            s = json.load(fh)
-            uid = s.get('collection_uid')
-            envs = s.get('environments')
-    if not uid and os.path.exists(ids_path):
-        with open(ids_path,'r',encoding='utf-8') as fh:
-            j = json.load(fh)
-            uid = j.get('collection_uid')
-            envs = j.get('environments')
-except Exception:
-    uid = None
-    envs = None
+          import json
+          import os
 
-if summary:
-    with open(summary,'a',encoding='utf-8') as s:
-        s.write('## Postman Upsert Results\n')
-        if uid:
-            s.write(f'- **Collection UID**: `{uid}`\n')
-        else:
-            s.write('- **Collection UID**: _not found_\n')
-            s.write('- Add `POSTMAN_COLLECTION_UID` (repo secret) to make future runs idempotent.\n')
-        if envs:
-            s.write('\n- **Environments**:\n')
-            for k,v in (envs.items() if isinstance(envs, dict) else []):
-                s.write(f'  - {k}: `{v}`\n')
-print('Wrote job summary (if available).')
-PY
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          state_path = "generated/state.json"
+          ids_path = "generated/postman_ids.json"
+
+          uid = None
+          envs = None
+
+          try:
+              if os.path.exists(state_path):
+                  with open(state_path, "r", encoding="utf-8") as fh:
+                      s = json.load(fh)
+                      uid = s.get("collection_uid")
+                      envs = s.get("environments")
+
+              if not uid and os.path.exists(ids_path):
+                  with open(ids_path, "r", encoding="utf-8") as fh:
+                      j = json.load(fh)
+                      uid = j.get("collection_uid")
+                      envs = j.get("environments")
+          except Exception:
+              uid = None
+              envs = None
+
+          if summary:
+              with open(summary, "a", encoding="utf-8") as f:
+                  f.write("## Postman Upsert Results\n\n")
+                  if uid:
+                      f.write(f"- **Collection UID**: `{uid}`\n")
+                  else:
+                      f.write("- **Collection UID**: _not found_\n")
+                      f.write("- Add `POSTMAN_COLLECTION_UID` (repo secret) to make future runs idempotent.\n")
+
+                  if isinstance(envs, dict) and envs:
+                      f.write("\n- **Environments**:\n")
+                      for k, v in envs.items():
+                          f.write(f"  - {k}: `{v}`\n")
+
+          print("Wrote job summary (if available).")
+          PY
 
       - name: Upload generated collection
         if: always()
