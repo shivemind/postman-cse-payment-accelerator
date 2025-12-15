@@ -146,11 +146,10 @@ def generate_collection(api_key: str, spec_id: str, name: str | None = None):
     url = f"{BASE_URL}/specs/{spec_id}/generations/collection"
 
     payload = {
-        "name": name or "Generated Collection",
+        "name": name or "Payments – Refund API",
         "options": {
-            # These keys + casing match the docs
-            "parametersResolution": "Schema",     # or "Example"
-            "folderStrategy": "Paths",            # or "Tags"
+            "parametersResolution": "Example",  # ← THIS is the key fix
+            "folderStrategy": "Paths",
             "requestNameSource": "Fallback",
             "indentCharacter": "Space",
             "enableOptionalParameters": True,
