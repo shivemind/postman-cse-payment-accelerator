@@ -76,6 +76,9 @@ For 46 APIs:
 
 > Note: This per-API example complements the team-level ROI shown in the accompanying presentation.
 
+This calculation excludes downstream savings from reduced rework, fewer support escalations, and improved API reliability across environments.
+
+
 ---
 
 ## Scaling Strategy
