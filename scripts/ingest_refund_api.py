@@ -346,12 +346,21 @@ def main():
     def _extract_uid(coll_obj):
         if not coll_obj or not isinstance(coll_obj, dict):
             return None
+
+        info = coll_obj.get("info") or {}
         return (
             coll_obj.get("uid")
-            or (coll_obj.get("collection") or {}).get("uid")
             or coll_obj.get("id")
+            or info.get("uid")
+            or info.get("_postman_id")
+            or (coll_obj.get("collection") or {}).get("uid")
             or (coll_obj.get("collection") or {}).get("id")
-        )
+            or ((coll_obj.get("collection") or {}).get("info") or {}).get("uid")
+            or ((coll_obj.get("collection") or {}).get("info") or {}).get("_postman_id")
+    )
+
+    coll_for_write.setdefault("info", {})
+    coll_for_write["info"]["name"] = "Payment Refund API"
 
     returned_uid = _extract_uid(collection)
     state_uid = prev_state.get("collection_uid")
