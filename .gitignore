@@ -113,6 +113,19 @@ Thumbs.db
 # ===============================
 # Generated Postman artifacts (CI runtime only)
 # ===============================
+
+# Generated Postman artifacts (CI runtime only)
+generated/
+generated/*.collection.json
+generated/*.json
+generated/postman_actions.log
+generated/state.json
+generated/postman_ids.json
+generated/environments/*.environment.json
+
+# If you ever accidentally create these at repo root:
+postman_ids.json
+state.json
 generated/postman_actions.log
 generated/state.json
 generated/postman_ids.json
