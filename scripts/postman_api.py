@@ -1,12 +1,17 @@
 import requests
 import re
+import time
 
 BASE_URL = "https://api.getpostman.com"
 
+
 def headers(api_key: str):
+    # Specs (API Builder) endpoints often require a versioned Accept header.
+    # This is safe to include for all requests.
     return {
         "X-Api-Key": api_key,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Accept": "application/vnd.api.v10+json",
     }
 
 
@@ -17,83 +22,140 @@ def sanitize_collection_for_patch(collection: dict) -> dict:
     reused for PUT or for writing to disk.
     """
     import copy as _copy
+
     if not collection or not isinstance(collection, dict):
         return collection
+
     sanitized = _copy.deepcopy(collection)
+
     try:
         info = None
         if "collection" in sanitized and isinstance(sanitized["collection"], dict):
             info = sanitized["collection"].get("info")
         elif isinstance(sanitized, dict):
             info = sanitized.get("info")
+
         if isinstance(info, dict) and "schema" in info:
-            # remove the schema key for PATCH payloads only
             del info["schema"]
-            # lightweight debug; do not print secrets or UIDs
             print("DEBUG: stripped collection.info.schema for PATCH")
     except Exception:
-        # Be defensive: if sanitization fails, return the deepcopy unchanged
+        # Defensive: if sanitization fails, return the deepcopy unchanged
         pass
+
     return sanitized
 
-def create_spec(api_key, workspace_id, name, raw_spec, version):
-    # Try a few payload shapes and contentType values to find what the API accepts.
-    content_types = ("yaml", "openapi", "application/yaml")
-    payload_shapes = []
 
-    # Shape A: nested under `spec` (original)
-    def shape_a(ct):
-        return {"spec": {"name": name, "content": raw_spec, "contentType": ct, "version": version}}
+def _infer_spec_type(raw_spec: str) -> str:
+    """Infer Postman Spec Hub 'type' from OpenAPI version.
 
-    # Shape B: top-level fields
-    def shape_b(ct):
-        return {"name": name, "content": raw_spec, "contentType": ct, "version": version}
+    Postman expects type values like: OPENAPI:3.0, OPENAPI:3.1, OPENAPI:2.0
+    """
+    try:
+        import yaml
+        spec = yaml.safe_load(raw_spec) or {}
+        v = str(spec.get("openapi") or spec.get("swagger") or "")
+    except Exception:
+        v = ""
 
-    # Shape C: top-level `spec` is raw content, with metadata at top-level
-    def shape_c(ct):
-        return {"spec": raw_spec, "name": name, "contentType": ct, "version": version}
+    if v.startswith("3.1"):
+        return "OPENAPI:3.1"
+    if v.startswith("3.0"):
+        return "OPENAPI:3.0"
+    if v.startswith("2.0") or v.startswith("2.") or v == "2":
+        return "OPENAPI:2.0"
+    # Default to 3.0 if unknown
+    return "OPENAPI:3.0"
 
-    payload_shapes = (shape_a, shape_b, shape_c)
 
-    attempts = []
-    last_response = None
-    for shape_fn in payload_shapes:
-        for ct in content_types:
-            payload = shape_fn(ct)
-            attempts.append({"shape": shape_fn.__name__, "contentType": ct})
-            r = requests.post(
-                f"{BASE_URL}/specs?workspaceId={workspace_id}",
-                headers=headers(api_key),
-                json=payload,
-                timeout=30,
-            )
+def create_spec(api_key: str, workspace_id: str, name: str, raw_spec: str, version: str | None = None):
+    """Create a Spec Hub spec via POST /specs?workspaceId=...
 
-            if r.status_code == 201:
-                return r.json()["spec"]["id"]
+    Postman expects a payload shaped like:
+      {
+        "name": "...",
+        "type": "OPENAPI:3.0",
+        "files": [{"path": "index.yaml", "content": "..."}]
+      }
 
-            last_response = r
-            if r.status_code != 400:
-                raise RuntimeError(f"Postman create_spec failed (attempts={attempts}): {r.status_code} - {r.text}")
+    NOTE: "version" is not consistently accepted across all accounts/tenants for create_spec.
+    Keep it out unless you confirm your tenant supports it.
+    """
+    spec_type = _infer_spec_type(raw_spec)
 
-    # If we get here all attempts returned 400. Surface the last response and payload attempts.
-    raise RuntimeError(f"Postman create_spec malformed request (attempts={attempts}): {last_response.status_code} - {last_response.text}")
-
-def generate_collection(api_key, spec_id):
     payload = {
-        "options": {
-            "requestParametersResolution": "example",
-            "exampleParametersResolution": "example"
-        }
+        "name": name,
+        "type": spec_type,
+        "files": [
+            {
+                "path": "index.yaml",
+                "content": raw_spec
+            }
+        ]
     }
 
     r = requests.post(
-        f"{BASE_URL}/specs/{spec_id}/generations/collection",
+        f"{BASE_URL}/specs?workspaceId={workspace_id}",
         headers=headers(api_key),
         json=payload,
-        timeout=30
+        timeout=30,
     )
-    r.raise_for_status()
-    return r.json()["collection"]
+
+    try:
+        r.raise_for_status()
+    except requests.exceptions.HTTPError:
+        raise RuntimeError(f"Postman create_spec failed: {r.status_code} - {r.text}")
+
+    data = r.json()
+
+    # Flexible parsing
+    if isinstance(data, dict):
+        if isinstance(data.get("spec"), dict):
+            spec = data["spec"]
+            spec_id = spec.get("id") or spec.get("uid")
+            if spec_id:
+                return spec_id
+        if "id" in data:
+            return data["id"]
+        if "uid" in data:
+            return data["uid"]
+
+    raise RuntimeError(f"Postman create_spec did not return an id/uid: {data}")
+
+
+def generate_collection(api_key: str, spec_id: str, name: str | None = None):
+    url = f"{BASE_URL}/specs/{spec_id}/generations/collection"
+
+    # Different tenants/versions accept different enum casings/values.
+    # Try the most common openapi-to-postman option combinations first.
+    option_variants = [
+        {"requestParametersResolution": "schema",  "exampleParametersResolution": "schema"},
+        {"requestParametersResolution": "example", "exampleParametersResolution": "example"},
+        {"requestParametersResolution": "schema",  "exampleParametersResolution": "example"},
+        {"requestParametersResolution": "example", "exampleParametersResolution": "schema"},
+    ]
+
+    last_err = None
+    for opts in option_variants:
+        payload = {
+            "name": name or "Generated Collection",
+            "options": opts
+        }
+
+        r = requests.post(url, headers=headers(api_key), json=payload, timeout=30)
+
+        if r.status_code < 400:
+            data = r.json()
+            if isinstance(data, dict) and isinstance(data.get("collection"), dict):
+                return data["collection"]
+            return data
+
+        last_err = (r.status_code, r.text, payload)
+
+    status, text, payload = last_err
+    raise RuntimeError(
+        f"Postman generate_collection failed for all option variants. "
+        f"Last status={status} body={text} payload={payload}"
+    )
 
 
 def import_openapi(api_key, workspace_id, name, raw_spec):
@@ -103,38 +165,28 @@ def import_openapi(api_key, workspace_id, name, raw_spec):
     """
     url = f"{BASE_URL}/import/openapi?workspace={workspace_id}"
 
-    # Try several `type` values; some Postman import backends accept different markers
-    # for OpenAPI/YAML content. Prefer payloads that produce a collection with `item`.
     tried = []
     for t in ("openapi", "openapi3", "yaml", "string"):
         payload = {"type": t, "input": raw_spec, "name": name}
         tried.append(t)
         r = requests.post(url, headers=headers(api_key), json=payload, timeout=90)
-        if r.status_code >= 400 and r.status_code < 500:
-            # try next type
+        if 400 <= r.status_code < 500:
             continue
         r.raise_for_status()
+
         data = r.json()
         collections = data.get("collections") or []
         if not collections:
-            # some responses may include `collection` at top-level
             coll = data.get("collection") or data
-            # If the returned object contains items, return it
             if isinstance(coll, dict) and (coll.get("item") or coll.get("items")):
                 return coll
-            # otherwise continue trying other types
             continue
 
-        # Extract the first collection object
         first = collections[0]
         coll = first.get("collection") or first
-        # If collection contains requests/items, return immediately
         if isinstance(coll, dict) and (coll.get("item") or coll.get("items")):
             return coll
-        # Otherwise keep iterating to try another payload type
 
-    # If we get here we didn't find a collection with `item` in any attempt; return
-    # the last successful payload's collection (if any) or raise.
     if 'data' in locals():
         collections = data.get("collections") or []
         if collections:
@@ -147,9 +199,9 @@ def import_openapi(api_key, workspace_id, name, raw_spec):
 
 
 def upsert_collection(api_key: str, workspace_id: str, coll_payload: dict, collection_uid: str | None = None):
-    """Create or update a collection. If `collection_uid` is provided, performs a PUT to update, otherwise POST to create."""
+    """Create or update a collection. If `collection_uid` is provided, PUT; else POST."""
     headers_ = headers(api_key)
-    # If caller already passed a top-level 'collection' wrapper, use it directly to avoid double-wrapping.
+
     if collection_uid:
         url = f"{BASE_URL}/collections/{collection_uid}"
         body = coll_payload if isinstance(coll_payload, dict) and "collection" in coll_payload else {"collection": coll_payload}
@@ -157,7 +209,6 @@ def upsert_collection(api_key: str, workspace_id: str, coll_payload: dict, colle
         if "collection" in body and isinstance(body["collection"], dict):
             coll = body["collection"]
             print(f"DEBUG: collection keys: {list(coll.keys())}")
-            # Ensure required shape for Postman API: `collection.info` and `collection.item` must exist
             if "info" not in coll:
                 coll["info"] = {"name": coll.get("name") or coll.get("id"), "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"}
             if "item" not in coll:
@@ -170,25 +221,20 @@ def upsert_collection(api_key: str, workspace_id: str, coll_payload: dict, colle
         if "collection" in body and isinstance(body["collection"], dict):
             coll = body["collection"]
             print(f"DEBUG: collection keys: {list(coll.keys())}")
-            # Ensure required shape for Postman API: `collection.info` and `collection.item` must exist
             if "info" not in coll:
                 coll["info"] = {"name": coll.get("name") or coll.get("id"), "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"}
             if "item" not in coll:
                 coll["item"] = coll.get("items") or []
         resp = requests.post(url, headers=headers_, json=body, timeout=30)
 
-    # Handle 404 specifically when caller provided a collection_uid: this means
-    # the caller attempted to PUT to a collection that doesn't exist or is
-    # inaccessible with the API key. In that case we must NOT fallback to POST;
-    # fail fast so callers can decide.
     if resp.status_code == 404 and collection_uid:
         raise RuntimeError(f"FATAL_UID_NOT_FOUND: collection_uid provided but not found or not accessible: {collection_uid}")
+
     try:
         resp.raise_for_status()
     except requests.exceptions.HTTPError:
         raise RuntimeError(f"Postman upsert_collection failed: {resp.status_code} - {resp.text}")
 
-    # Newer responses use `uid`, older may use `collection.uid` - be flexible
     data = resp.json()
     uid = data.get("collection", {}).get("uid") or data.get("collection", {}).get("id") or data.get("uid")
     if uid:
@@ -197,17 +243,11 @@ def upsert_collection(api_key: str, workspace_id: str, coll_payload: dict, colle
 
 
 def patch_collection(api_key: str, collection_uid: str, partial_body: dict):
-    """Apply a PATCH-style partial update to a collection.
-
-    Note: Postman's API primarily supports PUT for collection updates, but this helper
-    uses HTTP PATCH when callers want a partial change. If the API rejects PATCH,
-    the caller will receive an HTTP error.
-    """
+    """Apply a PATCH-style partial update to a collection."""
     url = f"{BASE_URL}/collections/{collection_uid}"
     headers_ = headers(api_key)
 
     # Accept either {'collection': {...}} or {...}
-    coll = None
     if isinstance(partial_body, dict) and "collection" in partial_body:
         coll = partial_body.get("collection")
     elif isinstance(partial_body, dict):
@@ -215,59 +255,50 @@ def patch_collection(api_key: str, collection_uid: str, partial_body: dict):
     else:
         raise RuntimeError("patch_collection expects a dict or {'collection': {...}} payload")
 
-    # Build candidate payloads that omit 'item' (structures) since PATCH must not include them
+    if not isinstance(coll, dict):
+        raise RuntimeError("patch_collection payload did not contain a dict collection")
+
+    # IMPORTANT: Actually use the sanitized copy
+    coll = sanitize_collection_for_patch(coll)
+
     def make_payload(include_event=True, include_variable=True):
         payload_coll = {}
         if coll.get("info"):
-            # Only include name/description/schema fields from info
             info = coll.get("info")
-            payload_coll["info"] = {
-                k: v for k, v in info.items() if k in ("name", "description", "schema")
-            }
+            payload_coll["info"] = {k: v for k, v in info.items() if k in ("name", "description", "schema")}
         if include_event and coll.get("event"):
             payload_coll["event"] = coll.get("event")
         if include_variable and coll.get("variable"):
             payload_coll["variable"] = coll.get("variable")
         return {"collection": payload_coll}
 
-    attempts = [ (True, True), (False, True), (False, False) ]
+    attempts = [(True, True), (False, True), (False, False)]
     last_exc = None
-    # Work on a sanitized copy for PATCH so we do not send info.schema (Postman rejects it)
-    sanitized_coll = sanitize_collection_for_patch(coll) if isinstance(coll, dict) else coll
+
     for include_event, include_variable in attempts:
         payload = make_payload(include_event=include_event, include_variable=include_variable)
         try:
             resp = requests.request("PATCH", url, headers=headers_, json=payload, timeout=30)
             if resp.status_code >= 400:
-                # If bad request, try next reduced payload
                 last_exc = RuntimeError(f"Postman patch_collection failed: {resp.status_code} - {resp.text}")
-                # If the response indicates invalid parameter for 'event', try smaller payload
                 continue
             data = resp.json()
-            # normalize return similar to upsert_collection
             return data.get("collection", {}).get("uid") or data.get("collection", {}).get("id") or data.get("uid") or data
         except requests.exceptions.RequestException as e:
             last_exc = e
             continue
 
-    # If we reach here, all attempts failed
     if last_exc:
         raise last_exc
     raise RuntimeError("Postman patch_collection failed: unknown error")
 
 
 def patch_collection_metadata_only(api_key: str, collection_uid: str, collection: dict):
-    """Attempt a metadata-only PATCH that never includes `item`.
-
-    This wraps existing `patch_collection` behavior which already builds
-    reduced payloads and omits `item`. On success returns the collection UID.
-    On failure it will raise so callers can fall back to PUT.
-    """
+    """Attempt a metadata-only PATCH that never includes `item`."""
     return patch_collection(api_key, collection_uid, {"collection": collection})
 
 
 def get_collection(api_key: str, collection_uid: str):
-    """Retrieve an existing collection by UID."""
     url = f"{BASE_URL}/collections/{collection_uid}"
     resp = requests.get(url, headers=headers(api_key), timeout=30)
     try:
@@ -279,7 +310,6 @@ def get_collection(api_key: str, collection_uid: str):
 
 
 def list_environments(api_key: str, workspace_id: str):
-    """List environments in a workspace. Returns a list of environment dicts."""
     url = f"{BASE_URL}/environments?workspace={workspace_id}"
     resp = requests.get(url, headers=headers(api_key), timeout=30)
     try:
@@ -291,19 +321,16 @@ def list_environments(api_key: str, workspace_id: str):
 
 
 def get_environment_by_name(api_key: str, workspace_id: str, name: str):
-    """Return the UID of an environment in the workspace by its name, or None."""
     if not name:
         return None
     envs = list_environments(api_key, workspace_id)
     for e in envs:
-        # Postman returns environment objects with `name` and `uid`/`id` keys
         if e.get("name") == name:
             return e.get("uid") or e.get("id")
     return None
 
 
 def list_collections(api_key: str, workspace_id: str):
-    """List collections in a workspace. Returns list of collection dicts."""
     url = f"{BASE_URL}/collections?workspace={workspace_id}"
     resp = requests.get(url, headers=headers(api_key), timeout=30)
     try:
@@ -315,15 +342,6 @@ def list_collections(api_key: str, workspace_id: str):
 
 
 def resolve_collection_uid(api_key: str, workspace_id: str, provided: str | None):
-    """Resolve a provided collection identifier to a Postman collection UID.
-
-    Returns a tuple `(resolved_uid_or_None, reason)` where `reason` is one of:
-      - 'verified_existing' when provided uid exists as-is
-      - 'recovered_by_suffix' when a suffix match was found
-      - 'resolved_exact' when a plain UUID resolved by exact match
-      - 'not_found' when no matching collection is found
-      - 'invalid_format' when the provided string doesn't match expected patterns
-    """
     if not provided:
         return None, None
     provided = provided.strip()
@@ -334,16 +352,12 @@ def resolve_collection_uid(api_key: str, workspace_id: str, provided: str | None
             return None
         return coll.get("uid") or coll.get("id") or entry.get("uid") or entry.get("id")
 
-    # Case 1: numeric-prefixed UID (e.g. '17451434-<uuid>')
     if re.match(r"^\d+-[0-9a-fA-F\-]{36}$", provided):
-        # Verify existence directly
         try:
             if collection_exists(api_key, provided):
                 return provided, "verified_existing"
         except Exception:
-            # If existence check errors, continue to attempt suffix recovery
             pass
-        # Attempt recovery by matching suffix after the first dash
         try:
             suffix = provided.split("-", 1)[1]
             cols = list_collections(api_key, workspace_id)
@@ -355,7 +369,6 @@ def resolve_collection_uid(api_key: str, workspace_id: str, provided: str | None
             pass
         return None, "not_found"
 
-    # Case 2: plain UUID
     if re.match(r"^[0-9a-fA-F\-]{36}$", provided):
         try:
             cols = list_collections(api_key, workspace_id)
@@ -375,7 +388,6 @@ def resolve_collection_uid(api_key: str, workspace_id: str, provided: str | None
 
 
 def collection_exists(api_key: str, collection_uid: str) -> bool:
-    """Return True if a collection with `collection_uid` exists, False if 404, else raise."""
     if not collection_uid:
         return False
     url = f"{BASE_URL}/collections/{collection_uid}"
@@ -390,7 +402,6 @@ def collection_exists(api_key: str, collection_uid: str) -> bool:
 
 
 def get_collection_by_name(api_key: str, workspace_id: str, name: str):
-    """Return the UID of a collection in the workspace by its name, or None."""
     if not name:
         return None
     cols = list_collections(api_key, workspace_id)
@@ -402,14 +413,6 @@ def get_collection_by_name(api_key: str, workspace_id: str, name: str):
 
 
 def sync_linked_collections(api_key: str, workspace_id: str, collection: dict):
-    """Sync any linked collections declared in the collection payload.
-
-    Look for a `linked_collections` top-level key (list). Each entry may be either a
-    UID string or an object with `uid` and optional `collection` payload. For entries
-    that provide a `collection` payload, we upsert that collection (using the uid
-    if provided). For UID-only entries we attempt to fetch the remote collection and
-    call an upsert to ensure it exists in the target workspace.
-    """
     if not collection or not isinstance(collection, dict):
         return []
 
@@ -423,7 +426,6 @@ def sync_linked_collections(api_key: str, workspace_id: str, collection: dict):
         try:
             if isinstance(entry, str):
                 uid = entry
-                # Fetch remote collection and re-upsert it into the workspace
                 remote = get_collection(api_key, uid)
                 res = upsert_collection(api_key, workspace_id, remote, uid)
                 results.append({"uid": uid, "result": res})
@@ -439,26 +441,13 @@ def sync_linked_collections(api_key: str, workspace_id: str, collection: dict):
 
 
 def openapi_to_collection(raw_spec: str, name: str):
-    """Lightweight OpenAPI -> Postman collection converter.
-
-    This is a minimal converter intended to produce usable requests for each
-    operation in an OpenAPI 3.x spec. It does not implement every OpenAPI feature
-    (servers arrays, complex parameter styles, auth flows), but it creates basic
-    requests with method, url, and JSON example bodies when available.
-    """
     import yaml
     try:
         spec = yaml.safe_load(raw_spec)
     except Exception:
-        # If parsing fails, return a minimal collection
         return {"info": {"name": name, "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"}, "item": []}
 
-    # We prefer using an environment variable for the base URL so requests
-    # in Postman show as `{{base_url}}/...` and respect the generated
-    # environments (Dev/QA/UAT/Prod). We'll ignore the spec server host and
-    # replace it with `{{base_url}}` for idempotent, environment-driven calls.
     base = "{{base_url}}"
-
     collection = {"info": {"name": name, "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"}, "item": []}
 
     paths = spec.get("paths") or {}
@@ -467,43 +456,27 @@ def openapi_to_collection(raw_spec: str, name: str):
             try:
                 op_obj = op or {}
                 op_name = op_obj.get("summary") or op_obj.get("operationId") or f"{method.upper()} {path}"
-                # Build URL raw using environment variable placeholder
-                # Ensure leading slash between base and path
-                if path.startswith("/"):
-                    raw_url = f"{base}{path}"
-                else:
-                    raw_url = f"{base}/{path}"
+                raw_url = f"{base}{path}" if path.startswith("/") else f"{base}/{path}"
 
-                # Build request body if example exists
                 body = None
                 rb = op_obj.get("requestBody") or {}
                 content = rb.get("content") or {}
                 if content:
-                    # Prefer application/json example
                     app_json = content.get("application/json") or {}
                     examples = app_json.get("examples") or {}
                     schema = app_json.get("schema") or {}
                     example_value = None
                     if examples:
-                        # take first example value
                         first = list(examples.values())[0]
                         example_value = first.get("value")
                     elif schema and isinstance(schema, dict):
-                        # no example; skip
                         example_value = None
 
                     if example_value is not None:
                         import json as _json
                         body = {"mode": "raw", "raw": _json.dumps(example_value, indent=2), "options": {"raw": {"language": "json"}}}
 
-                # Construct a Postman-friendly URL object. Using `raw` plus
-                # `host` and `path` helps the Postman app render variables
-                # and path segments. We place the entire host/variable into
-                # the first element of `host` so it remains a single token.
-                url_obj = {"raw": raw_url}
-                # host: keep as single entry to preserve `{{base_url}}`
-                url_obj["host"] = [base]
-                # path: split the path into segments (without leading slash)
+                url_obj = {"raw": raw_url, "host": [base]}
                 p = path.lstrip("/")
                 url_obj["path"] = p.split("/") if p else []
 
@@ -525,16 +498,14 @@ def openapi_to_collection(raw_spec: str, name: str):
 
 
 def upsert_environment(api_key: str, workspace_id: str, env_payload: dict, env_uid: str | None = None):
-    """Create or update an environment in Postman. Returns the environment UID or response body."""
     headers_ = headers(api_key)
-    # If no env_uid provided, attempt to find an existing environment by name
+
     if not env_uid:
         try:
             existing = get_environment_by_name(api_key, workspace_id, env_payload.get("name"))
             if existing:
                 env_uid = existing
         except Exception:
-            # fall through to create if lookup fails
             env_uid = None
 
     if env_uid:
@@ -554,10 +525,6 @@ def upsert_environment(api_key: str, workspace_id: str, env_payload: dict, env_u
 
 
 def delete_collection(api_key: str, collection_uid: str):
-    """Delete a collection by UID.
-
-    Returns True on success or raises a RuntimeError with the Postman error body.
-    """
     url = f"{BASE_URL}/collections/{collection_uid}"
     resp = requests.delete(url, headers=headers(api_key), timeout=30)
     try:
@@ -568,10 +535,6 @@ def delete_collection(api_key: str, collection_uid: str):
 
 
 def delete_environment(api_key: str, environment_uid: str):
-    """Delete an environment by UID.
-
-    Returns True on success or raises a RuntimeError with the Postman error body.
-    """
     url = f"{BASE_URL}/environments/{environment_uid}"
     resp = requests.delete(url, headers=headers(api_key), timeout=30)
     try:
@@ -580,14 +543,9 @@ def delete_environment(api_key: str, environment_uid: str):
         raise RuntimeError(f"Postman delete_environment failed: {resp.status_code} - {resp.text}")
     return True
 
-def create_environment(api_key, workspace_id, name, values):
-    payload = {
-        "environment": {
-            "name": name,
-            "values": values
-        }
-    }
 
+def create_environment(api_key, workspace_id, name, values):
+    payload = {"environment": {"name": name, "values": values}}
     r = requests.post(
         f"{BASE_URL}/environments?workspace={workspace_id}",
         headers=headers(api_key),
@@ -599,10 +557,6 @@ def create_environment(api_key, workspace_id, name, values):
 
 
 def create_empty_collection(api_key: str, workspace_id: str, name: str) -> str:
-    """Create an empty Postman collection with the given name in the workspace and return its UID.
-
-    The collection created will include a minimal `info` block and an empty `item` list.
-    """
     payload = {
         "collection": {
             "info": {
@@ -618,6 +572,7 @@ def create_empty_collection(api_key: str, workspace_id: str, name: str) -> str:
         resp.raise_for_status()
     except requests.exceptions.HTTPError:
         raise RuntimeError(f"Postman create_empty_collection failed: {resp.status_code} - {resp.text}")
+
     data = resp.json()
     uid = data.get("collection", {}).get("uid") or data.get("collection", {}).get("id") or data.get("uid")
     if not uid:
