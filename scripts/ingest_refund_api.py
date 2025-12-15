@@ -16,6 +16,7 @@ from postman_api import (
     upsert_environment,
     create_spec,
     generate_collection,
+    get_collection,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -185,6 +186,34 @@ def main():
             print("🔹 Generating Collection from Spec")
             _write_log("generate_collection_attempt", "starting", {"spec_id": spec_id})
             collection = generate_collection(api_key, spec_id)
+                        # generate_collection may return a generation record (not full collection JSON).
+            # If so, fetch the real collection from Postman by UID so we truly "generate from spec".
+                        # generate_collection may return a generation record (not full collection JSON).
+            # If so, fetch the real collection from Postman by UID so we truly "generate from spec".
+            gen = collection if isinstance(collection, dict) else {}
+            generated_uid = (
+                gen.get("collectionUid")
+                or gen.get("collection_id")
+                or gen.get("collectionId")
+                or (gen.get("collection") or {}).get("uid")
+                or (gen.get("collection") or {}).get("id")
+                or gen.get("uid")
+                or gen.get("id")
+            )
+
+            if generated_uid:
+                try:
+                    full = get_collection(api_key, generated_uid)
+                    # get_collection usually returns {"info":..., "item":...} shape (or wrapped).
+                    # Normalize to the plain collection dict if wrapped.
+                    if isinstance(full, dict) and "collection" in full and isinstance(full["collection"], dict):
+                        full = full["collection"]
+                    collection = full
+                    _write_log("get_generated_collection", "success", {"uid": generated_uid})
+                except Exception as e:
+                    _write_log("get_generated_collection", "failed", {"uid": generated_uid, "error": str(e)})
+
+
             _write_log("generate_collection", "success", {"spec_id": spec_id, "collection_preview": (collection.get('info', {}).get('name') if isinstance(collection, dict) else None)})
         except Exception as e:
             err = str(e)
