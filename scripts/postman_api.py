@@ -122,40 +122,64 @@ def create_spec(api_key: str, workspace_id: str, name: str, raw_spec: str, versi
     raise RuntimeError(f"Postman create_spec did not return an id/uid: {data}")
 
 
+def wait_for_task(api_key: str, task_url: str, timeout_s: int = 90):
+    """Poll task_url until finished or timeout."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        r = requests.get(f"{BASE_URL}{task_url}", headers=headers(api_key), timeout=30)
+        r.raise_for_status()
+        data = r.json()
+
+        # Different tenants may shape this slightly differently; these are common patterns.
+        status = (data.get("status") or data.get("state") or "").lower()
+        if status in ("completed", "complete", "succeeded", "success", "done"):
+            return data
+        if status in ("failed", "error"):
+            raise RuntimeError(f"Postman task failed: {data}")
+
+        time.sleep(2)
+
+    raise RuntimeError(f"Timed out waiting for task: {task_url}")
+
+
 def generate_collection(api_key: str, spec_id: str, name: str | None = None):
     url = f"{BASE_URL}/specs/{spec_id}/generations/collection"
 
-    # Different tenants/versions accept different enum casings/values.
-    # Try the most common openapi-to-postman option combinations first.
-    option_variants = [
-        {"requestParametersResolution": "schema",  "exampleParametersResolution": "schema"},
-        {"requestParametersResolution": "example", "exampleParametersResolution": "example"},
-        {"requestParametersResolution": "schema",  "exampleParametersResolution": "example"},
-        {"requestParametersResolution": "example", "exampleParametersResolution": "schema"},
-    ]
+    payload = {
+        "name": name or "Generated Collection",
+        "options": {
+            # These keys + casing match the docs
+            "parametersResolution": "Schema",     # or "Example"
+            "folderStrategy": "Paths",            # or "Tags"
+            "requestNameSource": "Fallback",
+            "indentCharacter": "Space",
+            "enableOptionalParameters": True,
+            "includeDeprecated": True,
+        },
+    }
 
-    last_err = None
-    for opts in option_variants:
-        payload = {
-            "name": name or "Generated Collection",
-            "options": opts
-        }
+    r = requests.post(url, headers=headers(api_key), json=payload, timeout=30)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Postman generate_collection failed: {r.status_code} - {r.text}")
 
-        r = requests.post(url, headers=headers(api_key), json=payload, timeout=30)
+    data = r.json()
+    task_url = data.get("url")
+    if not task_url:
+        raise RuntimeError(f"Expected task url in response, got: {data}")
 
-        if r.status_code < 400:
-            data = r.json()
-            if isinstance(data, dict) and isinstance(data.get("collection"), dict):
-                return data["collection"]
-            return data
+    # Wait for async generation to finish
+    wait_for_task(api_key, task_url, timeout_s=120)
 
-        last_err = (r.status_code, r.text, payload)
+    # After task completes, fetch generated collections list and pick the newest
+    list_url = f"{BASE_URL}/specs/{spec_id}/generations/collection"
+    lr = requests.get(list_url, headers=headers(api_key), timeout=30)
+    lr.raise_for_status()
+    collections = (lr.json().get("collections") or [])
+    if not collections:
+        raise RuntimeError("No generated collections found after generation task completed.")
 
-    status, text, payload = last_err
-    raise RuntimeError(
-        f"Postman generate_collection failed for all option variants. "
-        f"Last status={status} body={text} payload={payload}"
-    )
+    newest = sorted(collections, key=lambda x: x.get("createdAt") or "", reverse=True)[0]
+    return newest  # NOTE: this is a generated-collection record, not full collection JSON
 
 
 def import_openapi(api_key, workspace_id, name, raw_spec):
