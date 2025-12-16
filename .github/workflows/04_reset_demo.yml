@@ -35,54 +35,81 @@ jobs:
 
       - name: Validate confirmation
         run: |
-          if [[ "${{ github.event.inputs.confirm }}" != "RESET" ]]; then echo "Confirmation did not match 'RESET' - aborting" && exit 1; fi
+          if [[ "${{ github.event.inputs.confirm }}" != "RESET" ]]; then
+            echo "Confirmation did not match 'RESET' - aborting"
+            exit 1
+          fi
 
-      # Find & download the latest postman_state artifact produced by the ingest job
-      # We query the GitHub Actions API for the most recent successful `ingest.yml` run
-      # on `main` and then download that run's artifact. Runner filesystems are
-      # ephemeral so artifacts are used to persist state between workflow runs.
-      - name: Find latest ingest run id
+      # Find the most recent successful run on main that actually uploaded an artifact named "postman_state"
+      - name: Find latest run id that has postman_state artifact
         id: find_ingest
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+        shell: bash
         run: |
           python - << 'PY'
           import os, sys, json, urllib.request
-          repo = os.environ['GITHUB_REPOSITORY']
-          token = os.environ['GITHUB_TOKEN']
-          url = f"https://api.github.com/repos/{repo}/actions/workflows/ingest.yml/runs?branch=main&per_page=50"
-          req = urllib.request.Request(url, headers={
-              'Authorization': f'token {token}',
-              'Accept': 'application/vnd.github+json'
-          })
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          token = os.environ["GITHUB_TOKEN"]
+          out = os.environ.get("GITHUB_OUTPUT")
+
+          def gh_get(url: str):
+            req = urllib.request.Request(
+              url,
+              headers={
+                "Authorization": f"token {token}",
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "postman-reset-demo"
+              }
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+              return json.load(resp)
+
+          def write_output(key: str, value: str):
+            if out:
+              with open(out, "a", encoding="utf-8") as fh:
+                fh.write(f"{key}={value}\n")
+
           try:
-              with urllib.request.urlopen(req, timeout=30) as resp:
-                  data = json.load(resp)
-          except Exception:
-              out = os.environ.get('GITHUB_OUTPUT')
-              if out:
-                  with open(out, 'a') as fh:
-                      fh.write('run_id=\n')
-              print('Could not query workflow runs; continuing without run id')
-              sys.exit(0)
-          for run in data.get('workflow_runs', []):
-              if run.get('conclusion') == 'success':
-                  rid = run.get('id')
-                  out = os.environ.get('GITHUB_OUTPUT')
-                  if out:
-                      with open(out, 'a') as fh:
-                          fh.write(f'run_id={rid}\n')
-                  print(f'Found ingest run id: {rid}')
-                  sys.exit(0)
-          out = os.environ.get('GITHUB_OUTPUT')
-          if out:
-              with open(out, 'a') as fh:
-                  fh.write('run_id=\n')
-          print('No successful ingest run found; continuing without run id')
+            # Pull recent successful runs on main (across ALL workflows)
+            runs_url = f"https://api.github.com/repos/{repo}/actions/runs?branch=main&per_page=60"
+            runs_data = gh_get(runs_url)
+          except Exception as e:
+            print(f"Could not query workflow runs: {e}")
+            write_output("run_id", "")
+            sys.exit(0)
+
+          runs = runs_data.get("workflow_runs", []) or []
+          # Prefer most recent
+          for run in runs:
+            if run.get("conclusion") != "success":
+              continue
+
+            run_id = run.get("id")
+            if not run_id:
+              continue
+
+            try:
+              artifacts_url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100"
+              artifacts_data = gh_get(artifacts_url)
+            except Exception:
+              continue
+
+            artifacts = artifacts_data.get("artifacts", []) or []
+            for a in artifacts:
+              if a.get("name") == "postman_state" and not a.get("expired", False):
+                write_output("run_id", str(run_id))
+                print(f"Found run id with postman_state artifact: {run_id}")
+                sys.exit(0)
+
+          print("No successful run found with a non-expired postman_state artifact; continuing without artifact")
+          write_output("run_id", "")
           PY
 
-      - name: Download postman_state artifact
+      - name: Download postman_state artifact (best-effort)
+        if: ${{ steps.find_ingest.outputs.run_id != '' }}
         uses: actions/download-artifact@v4
         with:
           name: postman_state
