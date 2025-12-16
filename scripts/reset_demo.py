@@ -3,12 +3,16 @@ import sys
 import json
 from pathlib import Path
 from dotenv import load_dotenv
+import requests  # already used elsewhere in this repo
+
 from postman_api import (
     delete_collection,
     delete_environment,
     get_collection_by_name,
     get_environment_by_name,
 )
+
+POSTMAN_API_BASE = "https://api.getpostman.com"
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "generated"
@@ -21,6 +25,19 @@ def env(name):
     return v
 
 
+def delete_spec(api_key: str, spec_id: str):
+    """
+    Delete a Postman Spec (Spec Hub) by spec id.
+    - 204 = deleted
+    - 404 = already gone (non-fatal)
+    """
+    url = f"{POSTMAN_API_BASE}/specs/{spec_id}"
+    resp = requests.delete(url, headers={"X-Api-Key": api_key}, timeout=30)
+    if resp.status_code in (204, 404):
+        return
+    raise RuntimeError(f"Failed to delete spec {spec_id}: {resp.status_code} - {resp.text}")
+
+
 def main():
     load_dotenv()
     api_key = env("POSTMAN_API_KEY")
@@ -28,8 +45,11 @@ def main():
 
     ids_file = OUT / "postman_ids.json"
     state_file = OUT / "state.json"
+
     collection_uid = None
     env_uids = {}
+    spec_id = None
+
     # If a secret override is provided, prefer it (explicit intent).
     provided_uid = os.getenv("POSTMAN_COLLECTION_UID", "").strip() or None
     if provided_uid:
@@ -44,11 +64,13 @@ def main():
         except Exception:
             pass
 
-    # Next fallback: read generated/state.json which may contain a persisted bootstrap UID
-    if not collection_uid and state_file.exists():
+    # Always try to read state.json for spec_id (and as a fallback for collection_uid)
+    if state_file.exists():
         try:
             obj = json.loads(state_file.read_text())
-            collection_uid = obj.get("collection_uid")
+            if not collection_uid:
+                collection_uid = obj.get("collection_uid")
+            spec_id = obj.get("spec_id") or spec_id
         except Exception:
             pass
 
@@ -71,6 +93,19 @@ def main():
 
     errors = []
 
+    # NEW: Delete spec created by ingest (Option A)
+    if spec_id:
+        print(f"Deleting spec: {spec_id}")
+        try:
+            delete_spec(api_key, spec_id)
+            print("Deleted spec")
+        except Exception as e:
+            print("Failed to delete spec:", e)
+            errors.append(str(e))
+    else:
+        print("No spec_id found; skipping spec delete")
+
+    # Existing behavior: delete collection
     if collection_uid:
         print(f"Deleting collection: {collection_uid}")
         try:
@@ -88,6 +123,7 @@ def main():
     else:
         print("No collection UID found; skipping collection delete")
 
+    # Existing behavior: delete environments
     for k, uid in env_uids.items():
         if not uid:
             continue
