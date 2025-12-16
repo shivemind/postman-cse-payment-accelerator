@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       confirm:
-        description: 'Type RESET to confirm demo reset'
+        description: "Type RESET to confirm demo reset"
         required: true
       collection_uid:
-        description: 'Postman Collection UID to delete'
+        description: "Postman Collection UID to delete"
         required: true
 
 permissions:
@@ -24,7 +24,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Install dependencies
         shell: bash
@@ -34,95 +34,96 @@ jobs:
           pip install -r requirements.txt
 
       - name: Validate confirmation
+        shell: bash
         run: |
+          set -euo pipefail
           if [[ "${{ github.event.inputs.confirm }}" != "RESET" ]]; then
             echo "Confirmation did not match 'RESET' - aborting"
             exit 1
           fi
 
-      # Find the most recent successful run on main that actually uploaded an artifact named "postman_state"
-      - name: Find latest run id that has postman_state artifact
+      # Find a successful ingest.yml run that actually has the postman_state artifact
+      - name: Find latest ingest run id (with postman_state artifact)
         id: find_ingest
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
+          set -euo pipefail
           python - << 'PY'
           import os, sys, json, urllib.request
 
-          repo = os.environ["GITHUB_REPOSITORY"]
-          token = os.environ["GITHUB_TOKEN"]
-          out = os.environ.get("GITHUB_OUTPUT")
+          repo = os.environ['GITHUB_REPOSITORY']
+          token = os.environ['GITHUB_TOKEN']
 
           def gh_get(url: str):
-            req = urllib.request.Request(
-              url,
-              headers={
-                "Authorization": f"token {token}",
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "postman-reset-demo"
-              }
-            )
-            with urllib.request.urlopen(req, timeout=30) as resp:
-              return json.load(resp)
+              req = urllib.request.Request(
+                  url,
+                  headers={
+                      'Authorization': f'token {token}',
+                      'Accept': 'application/vnd.github+json'
+                  }
+              )
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  return json.load(resp)
 
-          def write_output(key: str, value: str):
-            if out:
-              with open(out, "a", encoding="utf-8") as fh:
-                fh.write(f"{key}={value}\n")
+          out = os.environ.get('GITHUB_OUTPUT')
 
           try:
-            # Pull recent successful runs on main (across ALL workflows)
-            runs_url = f"https://api.github.com/repos/{repo}/actions/runs?branch=main&per_page=60"
-            runs_data = gh_get(runs_url)
+              runs = gh_get(f"https://api.github.com/repos/{repo}/actions/workflows/ingest.yml/runs?branch=main&per_page=50")
           except Exception as e:
-            print(f"Could not query workflow runs: {e}")
-            write_output("run_id", "")
-            sys.exit(0)
+              if out:
+                  with open(out, 'a') as fh:
+                      fh.write("run_id=\n")
+              print(f"Could not query workflow runs: {e}")
+              sys.exit(0)
 
-          runs = runs_data.get("workflow_runs", []) or []
-          # Prefer most recent
-          for run in runs:
-            if run.get("conclusion") != "success":
-              continue
+          for run in runs.get('workflow_runs', []):
+              if run.get('conclusion') != 'success':
+                  continue
 
-            run_id = run.get("id")
-            if not run_id:
-              continue
+              rid = run.get('id')
+              try:
+                  arts = gh_get(f"https://api.github.com/repos/{repo}/actions/runs/{rid}/artifacts")
+              except Exception:
+                  continue
 
-            try:
-              artifacts_url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100"
-              artifacts_data = gh_get(artifacts_url)
-            except Exception:
-              continue
+              names = [a.get('name') for a in arts.get('artifacts', [])]
+              if "postman_state" in names:
+                  if out:
+                      with open(out, 'a') as fh:
+                          fh.write(f"run_id={rid}\n")
+                  print(f"Found run id with postman_state artifact: {rid}")
+                  sys.exit(0)
 
-            artifacts = artifacts_data.get("artifacts", []) or []
-            for a in artifacts:
-              if a.get("name") == "postman_state" and not a.get("expired", False):
-                write_output("run_id", str(run_id))
-                print(f"Found run id with postman_state artifact: {run_id}")
-                sys.exit(0)
-
-          print("No successful run found with a non-expired postman_state artifact; continuing without artifact")
-          write_output("run_id", "")
+          if out:
+              with open(out, 'a') as fh:
+                  fh.write("run_id=\n")
+          print("No successful ingest run with postman_state artifact found")
           PY
 
-      - name: Download postman_state artifact (best-effort)
-        if: ${{ steps.find_ingest.outputs.run_id != '' }}
+      - name: Debug selected run id
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Selected ingest run id: '${{ steps.find_ingest.outputs.run_id }}'"
+
+      - name: Download postman_state artifact
         uses: actions/download-artifact@v4
         with:
           name: postman_state
           path: generated
           run-id: ${{ steps.find_ingest.outputs.run_id }}
           repository: ${{ github.repository }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
 
       - name: Show downloaded artifact files
         shell: bash
         run: |
           set -euo pipefail
-          echo 'Generated dir contents:'
+          echo "Generated dir contents:"
           ls -la generated || true
 
       - name: Run reset script
